@@ -1,6 +1,6 @@
 # Dictator
 
-Voice-to-text tool for Ubuntu with X11. Hold a configurable hotkey to dictate, release to transcribe and auto-paste from clipboard
+Voice-to-text tool for Ubuntu with X11. Hold a hotkey to dictate, release to transcribe. Two hotkeys: one copies to clipboard, the other copies and auto-pastes.
 
 ## Install
 
@@ -40,21 +40,20 @@ Optional config file at `/etc/dictator.conf`. If missing, defaults apply. Format
 
 ```ini
 # /etc/dictator.conf
-key = shift+F1
+copy_key = F1
+paste_key = shift+F1
 notify = true
-autopaste = true
 ```
 
 ### Options
 
 | Key | Description | Format | Default |
 |-----|-------------|--------|---------|
-| `key` | Hotkey combo | `[shift+][ctrl+][alt+][super+]KeyName` | `F1` |
+| `copy_key` | Hotkey: transcribe + clipboard only | `[shift+][ctrl+][alt+][super+]KeyName` | `F1` |
+| `paste_key` | Hotkey: transcribe + clipboard + Ctrl+V | `[shift+][ctrl+][alt+][super+]KeyName` | `shift+F1` |
 | `notify` | Desktop notifications | `true` / `false` | `true` |
-| `autopaste` | Auto Ctrl+V after clipboard copy | `true` / `false` | `true` |
 
 - **KeyName** is any X11 keysym name recognized by `XStringToKeysym()` (e.g. `F1`, `F5`, `space`, `a`).
 - Modifier prefixes are case-insensitive (`Shift+F1` and `shift+f1` prefixes both work, but the KeyName itself is case-sensitive per X11).
-- When `autopaste = false`, text is copied to clipboard only (no simulated Ctrl+V).
 - When `notify = false`, no `notify-send` desktop notifications are shown.
 - Invalid key names cause a clear error on stderr and exit.

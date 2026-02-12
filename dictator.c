@@ -1,5 +1,5 @@
 /*
- * dictator — hold Shift+F1 to dictate, release to transcribe and paste
+ * dictator — hold a hotkey to dictate, release to transcribe
  * Build: gcc -O2 -Wall -Wextra -o dictator dictator.c -lX11 -lasound -lcurl -lpthread
  */
 
@@ -33,19 +33,45 @@ static char api_key[1024];
 
 /* ── Config ─────────────────────────────────────────────────────────── */
 
-static struct {
+struct hotkey {
     char     key_name[64];    /* X11 keysym name, e.g. "F1" */
     unsigned mod_mask;        /* modifier mask, e.g. ShiftMask */
-    int      notify;          /* 1 = show desktop notifications */
-    int      autopaste;       /* 1 = ctrl+v after clipboard copy */
+};
+
+static struct {
+    struct hotkey copy_key;   /* transcribe + clipboard only */
+    struct hotkey paste_key;  /* transcribe + clipboard + Ctrl+V */
+    int           notify;     /* 1 = show desktop notifications */
 } cfg = {
-    .key_name  = "F1",
-    .mod_mask  = 0,
+    .copy_key  = { .key_name = "F1", .mod_mask = 0 },
+    .paste_key = { .key_name = "F1", .mod_mask = ShiftMask },
     .notify    = 1,
-    .autopaste = 1,
 };
 
 /* ── Config file loader ─────────────────────────────────────────────── */
+
+static void parse_hotkey(const char *val, struct hotkey *hk) {
+    hk->mod_mask = 0;
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "%s", val);
+    char *rest = tmp;
+    for (;;) {
+        if (strncasecmp(rest, "shift+", 6) == 0) {
+            hk->mod_mask |= ShiftMask; rest += 6;
+        } else if (strncasecmp(rest, "ctrl+", 5) == 0) {
+            hk->mod_mask |= ControlMask; rest += 5;
+        } else if (strncasecmp(rest, "control+", 8) == 0) {
+            hk->mod_mask |= ControlMask; rest += 8;
+        } else if (strncasecmp(rest, "alt+", 4) == 0) {
+            hk->mod_mask |= Mod1Mask; rest += 4;
+        } else if (strncasecmp(rest, "super+", 6) == 0) {
+            hk->mod_mask |= Mod4Mask; rest += 6;
+        } else {
+            break;
+        }
+    }
+    snprintf(hk->key_name, sizeof(hk->key_name), "%s", rest);
+}
 
 static int load_config_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -78,33 +104,14 @@ static int load_config_file(const char *path) {
         char *val = eq + 1;
         while (*val == ' ' || *val == '\t') val++;
 
-        if (strcmp(key, "key") == 0) {
-            cfg.mod_mask = 0;
-            /* parse modifier prefixes */
-            char tmp[64];
-            snprintf(tmp, sizeof(tmp), "%s", val);
-            char *rest = tmp;
-            for (;;) {
-                if (strncasecmp(rest, "shift+", 6) == 0) {
-                    cfg.mod_mask |= ShiftMask; rest += 6;
-                } else if (strncasecmp(rest, "ctrl+", 5) == 0) {
-                    cfg.mod_mask |= ControlMask; rest += 5;
-                } else if (strncasecmp(rest, "control+", 8) == 0) {
-                    cfg.mod_mask |= ControlMask; rest += 8;
-                } else if (strncasecmp(rest, "alt+", 4) == 0) {
-                    cfg.mod_mask |= Mod1Mask; rest += 4;
-                } else if (strncasecmp(rest, "super+", 6) == 0) {
-                    cfg.mod_mask |= Mod4Mask; rest += 6;
-                } else {
-                    break;
-                }
-            }
-            snprintf(cfg.key_name, sizeof(cfg.key_name), "%s", rest);
+        if (strcmp(key, "copy_key") == 0) {
+            parse_hotkey(val, &cfg.copy_key);
+        } else if (strcmp(key, "paste_key") == 0) {
+            parse_hotkey(val, &cfg.paste_key);
         } else if (strcmp(key, "notify") == 0) {
             cfg.notify = (strcmp(val, "true") == 0);
-        } else if (strcmp(key, "autopaste") == 0) {
-            cfg.autopaste = (strcmp(val, "true") == 0);
         }
+        /* old "key" and "autopaste" entries silently ignored */
     }
     fclose(f);
     return 0;
@@ -328,14 +335,14 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
 
 /* ── Clipboard + paste ──────────────────────────────────────────────── */
 
-static void paste_text(const char *text) {
+static void paste_text(const char *text, int autopaste) {
     /* Copy to clipboard via xclip */
     FILE *p = popen("xclip -selection clipboard", "w");
     if (p) {
         fwrite(text, 1, strlen(text), p);
         pclose(p);
     }
-    if (!cfg.autopaste) return;
+    if (!autopaste) return;
     /* Small delay to ensure clipboard is set */
     usleep(50000);
     /* Simulate Ctrl+V */
@@ -351,6 +358,31 @@ static void handle_signal(int sig) {
     quit = 1;
 }
 
+/* ── X11 hotkey grab helpers ─────────────────────────────────────────── */
+
+static const unsigned int lock_combos[] = {0, Mod2Mask, LockMask, Mod2Mask | LockMask};
+#define N_LOCK_COMBOS (sizeof(lock_combos)/sizeof(lock_combos[0]))
+
+static void grab_hotkey(Display *dpy, Window root, KeyCode kc, unsigned mod) {
+    for (size_t i = 0; i < N_LOCK_COMBOS; i++)
+        XGrabKey(dpy, kc, mod | lock_combos[i], root,
+                 False, GrabModeAsync, GrabModeAsync);
+}
+
+static void ungrab_hotkey(Display *dpy, Window root, KeyCode kc, unsigned mod) {
+    for (size_t i = 0; i < N_LOCK_COMBOS; i++)
+        XUngrabKey(dpy, kc, mod | lock_combos[i], root);
+}
+
+static void print_hotkey(const struct hotkey *hk, char *buf, size_t len) {
+    snprintf(buf, len, "%s%s%s%s%s",
+             (hk->mod_mask & ShiftMask)   ? "Shift+" : "",
+             (hk->mod_mask & ControlMask) ? "Ctrl+"  : "",
+             (hk->mod_mask & Mod1Mask)    ? "Alt+"   : "",
+             (hk->mod_mask & Mod4Mask)    ? "Super+" : "",
+             hk->key_name);
+}
+
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -362,33 +394,39 @@ int main(void) {
     if (!dpy) { fprintf(stderr, "dictator: cannot open display\n"); return 1; }
     XkbSetDetectableAutoRepeat(dpy, True, NULL);
 
-    KeySym ks = XStringToKeysym(cfg.key_name);
-    if (ks == NoSymbol) {
-        fprintf(stderr, "dictator: unknown key name '%s'\n", cfg.key_name);
+    /* Resolve copy_key */
+    KeySym copy_ks = XStringToKeysym(cfg.copy_key.key_name);
+    if (copy_ks == NoSymbol) {
+        fprintf(stderr, "dictator: unknown copy_key '%s'\n", cfg.copy_key.key_name);
+        return 1;
+    }
+    /* Resolve paste_key */
+    KeySym paste_ks = XStringToKeysym(cfg.paste_key.key_name);
+    if (paste_ks == NoSymbol) {
+        fprintf(stderr, "dictator: unknown paste_key '%s'\n", cfg.paste_key.key_name);
         return 1;
     }
 
     Window root = DefaultRootWindow(dpy);
-    KeyCode kc = XKeysymToKeycode(dpy, ks);
+    KeyCode copy_kc  = XKeysymToKeycode(dpy, copy_ks);
+    KeyCode paste_kc = XKeysymToKeycode(dpy, paste_ks);
 
-    /* Grab hotkey with lock-key combos (NumLock=Mod2, CapsLock=Lock) */
-    unsigned int locks[] = {0, Mod2Mask, LockMask, Mod2Mask | LockMask};
-    for (size_t i = 0; i < sizeof(locks)/sizeof(locks[0]); i++)
-        XGrabKey(dpy, kc, cfg.mod_mask | locks[i], root,
-                 False, GrabModeAsync, GrabModeAsync);
+    grab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
+    grab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
 
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
 
-    printf("dictator: ready — hold %s%s%s%s%s to record\n",
-           (cfg.mod_mask & ShiftMask)   ? "Shift+" : "",
-           (cfg.mod_mask & ControlMask) ? "Ctrl+"  : "",
-           (cfg.mod_mask & Mod1Mask)    ? "Alt+"   : "",
-           (cfg.mod_mask & Mod4Mask)    ? "Super+" : "",
-           cfg.key_name);
+    char copy_str[128], paste_str[128];
+    print_hotkey(&cfg.copy_key,  copy_str,  sizeof(copy_str));
+    print_hotkey(&cfg.paste_key, paste_str, sizeof(paste_str));
+    printf("dictator: ready — hold %s to copy, %s to paste\n",
+           copy_str, paste_str);
 
     pthread_t tid;
     int is_recording = 0;
+    int active_autopaste = 0;  /* whether current recording should autopaste */
+    KeyCode active_kc = 0;    /* keycode that started recording */
 
     while (!quit) {
         XEvent ev;
@@ -396,6 +434,21 @@ int main(void) {
         if (quit) break;
 
         if (ev.type == KeyPress && !is_recording) {
+            /* Strip lock-key bits to match our configured modifiers */
+            unsigned clean = ev.xkey.state & ~(Mod2Mask | LockMask);
+
+            if (ev.xkey.keycode == paste_kc &&
+                clean == cfg.paste_key.mod_mask) {
+                active_autopaste = 1;
+                active_kc = paste_kc;
+            } else if (ev.xkey.keycode == copy_kc &&
+                       clean == cfg.copy_key.mod_mask) {
+                active_autopaste = 0;
+                active_kc = copy_kc;
+            } else {
+                continue;
+            }
+
             is_recording = 1;
             recording = 1;
             notify("Recording...");
@@ -407,7 +460,8 @@ int main(void) {
                 continue;
             }
         }
-        else if (ev.type == KeyRelease && is_recording) {
+        else if (ev.type == KeyRelease && is_recording &&
+                 ev.xkey.keycode == active_kc) {
             recording = 0;
             pthread_join(tid, NULL);
             is_recording = 0;
@@ -428,8 +482,9 @@ int main(void) {
             free(wav);
 
             if (text && strlen(text) > 0) {
-                paste_text(text);
-                notify("Done — copied to clipboard");
+                paste_text(text, active_autopaste);
+                notify(active_autopaste ? "Done — pasted"
+                                        : "Done — copied to clipboard");
                 printf("dictator: %s\n", text);
                 free(text);
             } else {
@@ -443,8 +498,8 @@ int main(void) {
         recording = 0;
         pthread_join(tid, NULL);
     }
-    for (size_t i = 0; i < sizeof(locks)/sizeof(locks[0]); i++)
-        XUngrabKey(dpy, kc, cfg.mod_mask | locks[i], root);
+    ungrab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
+    ungrab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
     curl_global_cleanup();
     XCloseDisplay(dpy);
     printf("dictator: shutdown\n");
