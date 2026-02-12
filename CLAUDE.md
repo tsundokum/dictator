@@ -2,33 +2,38 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What This Is
-
-Dictator is a voice-to-text tool for Ubuntu/X11. Hold a hotkey to record audio via ALSA, release to transcribe via the Groq Whisper API, and auto-paste the result. Single C file architecture with two threads (main event loop + ALSA recording).
-
 ## Build & Test
 
 ```bash
-# Install dependencies (Ubuntu)
-sudo apt install libasound2-dev libcurl4-openssl-dev xdotool libx11-dev xclip
-
-# Build
-make
-
-# Build and run tests (config parser unit tests)
-make test
+make        # build
+make test   # config parser unit tests
+make clean  # remove build artifacts
 ```
 
 Linker flags: `-lX11 -lasound -lcurl -lpthread`
 
-## Runtime Setup
-
-Requires a `.env` file in the working directory with `GROQ=gsk_...` (Groq API key). Optional config at `/etc/dictator.conf`.
-
 ## Architecture
 
-Everything is in `dictator.c`. Tests are in `test_config.c`, which `#include`s `dictator.c` directly (with `#define main dictator_main` to avoid symbol collision) so it can access the static `cfg` struct and `load_config_file()`.
+Single C file (`dictator.c`), two threads. Tests in `test_config.c` which `#include`s `dictator.c` directly (with `#define main dictator_main` to avoid symbol collision) so it can access the static `cfg` struct and `load_config_file()`.
 
 Key statics: `pcm_buf` (recording buffer), `cfg` (config struct with key_name/mod_mask/notify/autopaste), `api_key` (loaded from .env).
 
 Flow: `load_config()` → `load_env()` → X11 grab hotkey → event loop → on KeyPress spawn `record_thread()` → on KeyRelease join thread, `build_wav()` → `transcribe()` → `paste_text()`.
+
+1. **Main thread** — X11 event loop. On KeyPress spawns recording thread; on KeyRelease joins it, builds WAV, calls Groq API, pastes result.
+
+2. **Recording thread** — ALSA capture at 16kHz/mono/16-bit into `pcm_buf` until `recording` flag clears or 60s max.
+
+### Key components
+
+| Function / Symbol | What it does |
+|---------|-------------|
+| `cfg` struct + `load_config()` | Parses `/etc/dictator.conf`, sets hotkey/modifiers/notify/autopaste |
+| `load_env()` | Reads `GROQ=` from `.env` |
+| `notify()` | Fires `notify-send` (respects `cfg.notify`) |
+| `record_thread()` | ALSA capture into `pcm_buf` |
+| `build_wav()` | Wraps PCM buffer in a WAV header (in-memory) |
+| `transcribe()` | POSTs WAV to Groq Whisper API via libcurl, returns text |
+| `paste_text()` | Pipes text to `xclip`, optionally simulates Ctrl+V via `xdotool` |
+| `main()` | Config/env init, X11 hotkey grab, event loop |
+
