@@ -8,8 +8,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <signal.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/XKBlib.h>
 #include <alsa/asoundlib.h>
 #include <curl/curl.h>
 
@@ -24,7 +27,7 @@
 
 static int16_t  pcm_buf[BUF_SAMPLES];
 static size_t   pcm_pos;           /* samples written */
-static volatile int recording;     /* flag: 1 = keep recording */
+static atomic_int recording;       /* flag: 1 = keep recording */
 
 static char api_key[1024];
 
@@ -138,9 +141,21 @@ static int run(const char *cmd) { return system(cmd); }
 
 static void notify(const char *msg) {
     if (!cfg.notify) return;
+    /* Escape single quotes: replace ' with '\'' for safe shell interpolation */
+    char safe[512];
+    size_t j = 0;
+    for (size_t i = 0; msg[i] && j + 4 < sizeof(safe); i++) {
+        if (msg[i] == '\'') {
+            memcpy(safe + j, "'\\''", 4);
+            j += 4;
+        } else {
+            safe[j++] = msg[i];
+        }
+    }
+    safe[j] = '\0';
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "notify-send -t 2000 'Dictator' '%s' 2>/dev/null &", msg);
+             "notify-send -t 2000 'Dictator' '%s' 2>/dev/null &", safe);
     if (run(cmd)) { /* best effort */ }
 }
 
@@ -164,6 +179,12 @@ static void *record_thread(void *arg) {
     snd_pcm_hw_params_set_channels(pcm, params, CHANNELS);
     unsigned int rate = SAMPLE_RATE;
     snd_pcm_hw_params_set_rate_near(pcm, params, &rate, NULL);
+    if (rate != SAMPLE_RATE) {
+        fprintf(stderr, "dictator: ALSA rate %u != %d, aborting\n",
+                rate, SAMPLE_RATE);
+        snd_pcm_close(pcm);
+        return NULL;
+    }
     snd_pcm_uframes_t period = PERIOD_FRAMES;
     snd_pcm_hw_params_set_period_size_near(pcm, params, &period, NULL);
 
@@ -174,8 +195,8 @@ static void *record_thread(void *arg) {
     }
 
     pcm_pos = 0;
-    while (recording && pcm_pos + PERIOD_FRAMES <= BUF_SAMPLES) {
-        snd_pcm_sframes_t n = snd_pcm_readi(pcm, pcm_buf + pcm_pos, PERIOD_FRAMES);
+    while (recording && pcm_pos + period <= (snd_pcm_uframes_t)BUF_SAMPLES) {
+        snd_pcm_sframes_t n = snd_pcm_readi(pcm, pcm_buf + pcm_pos, period);
         if (n == -EPIPE) {
             snd_pcm_prepare(pcm);
             continue;
@@ -321,6 +342,15 @@ static void paste_text(const char *text) {
     if (run("xdotool key --clearmodifiers ctrl+v")) { /* best effort */ }
 }
 
+/* ── Signal handling ─────────────────────────────────────────────────── */
+
+static volatile sig_atomic_t quit;
+
+static void handle_signal(int sig) {
+    (void)sig;
+    quit = 1;
+}
+
 /* ── Main ───────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -330,6 +360,7 @@ int main(void) {
 
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "dictator: cannot open display\n"); return 1; }
+    XkbSetDetectableAutoRepeat(dpy, True, NULL);
 
     KeySym ks = XStringToKeysym(cfg.key_name);
     if (ks == NoSymbol) {
@@ -346,6 +377,9 @@ int main(void) {
         XGrabKey(dpy, kc, cfg.mod_mask | locks[i], root,
                  False, GrabModeAsync, GrabModeAsync);
 
+    signal(SIGINT,  handle_signal);
+    signal(SIGTERM, handle_signal);
+
     printf("dictator: ready — hold %s%s%s%s%s to record\n",
            (cfg.mod_mask & ShiftMask)   ? "Shift+" : "",
            (cfg.mod_mask & ControlMask) ? "Ctrl+"  : "",
@@ -356,28 +390,24 @@ int main(void) {
     pthread_t tid;
     int is_recording = 0;
 
-    for (;;) {
+    while (!quit) {
         XEvent ev;
         XNextEvent(dpy, &ev);
+        if (quit) break;
 
         if (ev.type == KeyPress && !is_recording) {
             is_recording = 1;
             recording = 1;
             notify("Recording...");
-            pthread_create(&tid, NULL, record_thread, NULL);
+            if (pthread_create(&tid, NULL, record_thread, NULL) != 0) {
+                perror("dictator: pthread_create");
+                notify("Failed to start recording");
+                is_recording = 0;
+                recording = 0;
+                continue;
+            }
         }
         else if (ev.type == KeyRelease && is_recording) {
-            /* Filter auto-repeat: if next event is KeyPress of same key, skip */
-            if (XPending(dpy)) {
-                XEvent next;
-                XPeekEvent(dpy, &next);
-                if (next.type == KeyPress && next.xkey.keycode == ev.xkey.keycode
-                    && next.xkey.time == ev.xkey.time) {
-                    XNextEvent(dpy, &next); /* consume the repeat press */
-                    continue;
-                }
-            }
-
             recording = 0;
             pthread_join(tid, NULL);
             is_recording = 0;
@@ -409,8 +439,14 @@ int main(void) {
         }
     }
 
-    /* unreachable, but for completeness */
+    if (is_recording) {
+        recording = 0;
+        pthread_join(tid, NULL);
+    }
+    for (size_t i = 0; i < sizeof(locks)/sizeof(locks[0]); i++)
+        XUngrabKey(dpy, kc, cfg.mod_mask | locks[i], root);
     curl_global_cleanup();
     XCloseDisplay(dpy);
+    printf("dictator: shutdown\n");
     return 0;
 }
