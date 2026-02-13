@@ -9,11 +9,20 @@ dictator: dictator.c
 test_config: test_config.c dictator.c
 	$(CC) $(CFLAGS) $(BACKEND_FLAGS) -o $@ test_config.c $(LIBS)
 
-test: test_config
-	./test_config
+test_audio: test_audio.c dictator.c
+	$(CC) $(CFLAGS) $(BACKEND_FLAGS) -o $@ test_audio.c $(LIBS)
+
+test: test_config test_audio
+	./test_config && ./test_audio
+
+test_e2e: test_e2e.c dictator.c
+	$(CC) $(CFLAGS) $(BACKEND_FLAGS) -o $@ test_e2e.c $(LIBS)
+
+e2e: test_e2e
+	./test_e2e
 
 clean:
-	rm -f dictator test_config
+	rm -f dictator test_config test_audio test_e2e
 
 install: dictator
 	sudo install -Dm755 dictator /usr/local/bin/dictator
@@ -47,4 +56,4 @@ uninstall:
 	sudo rm -f /usr/local/bin/dictator
 	@echo "Removed binary and service. ~/.config/dictator/ left intact (contains API key)."
 
-.PHONY: clean test install uninstall
+.PHONY: clean test e2e install uninstall

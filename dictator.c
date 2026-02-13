@@ -33,10 +33,12 @@
 #define SAMPLE_RATE  16000
 #define CHANNELS     1
 #define FRAME_SIZE   2              /* 16-bit = 2 bytes */
-#define MAX_SECONDS  60
+#define MAX_SECONDS  300
 #define BUF_SAMPLES  (SAMPLE_RATE * MAX_SECONDS)
 #define BUF_BYTES    (BUF_SAMPLES * FRAME_SIZE)
 #define PERIOD_FRAMES 1024
+#define CHUNK_SECONDS 30
+#define CHUNK_SAMPLES (SAMPLE_RATE * CHUNK_SECONDS)
 
 static int16_t  pcm_buf[BUF_SAMPLES];
 static size_t   pcm_pos;           /* samples written */
@@ -80,10 +82,12 @@ static struct {
     struct hotkey copy_key;   /* transcribe + clipboard only */
     struct hotkey paste_key;  /* transcribe + clipboard + Ctrl+V */
     int           notify;     /* 1 = show desktop notifications */
+    int           max_duration; /* recording limit in seconds */
 } cfg = {
-    .copy_key  = { .key_name = "F1", .mod_mask = 0 },
-    .paste_key = { .key_name = "F1", .mod_mask = MOD_SHIFT },
-    .notify    = 1,
+    .copy_key     = { .key_name = "F1", .mod_mask = 0 },
+    .paste_key    = { .key_name = "F1", .mod_mask = MOD_SHIFT },
+    .notify       = 1,
+    .max_duration = MAX_SECONDS,
 };
 
 /* ── Config file loader ─────────────────────────────────────────────── */
@@ -148,6 +152,11 @@ static int load_config_file(const char *path) {
             parse_hotkey(val, &cfg.paste_key);
         } else if (strcmp(key, "notify") == 0) {
             cfg.notify = (strcmp(val, "true") == 0);
+        } else if (strcmp(key, "max_duration") == 0) {
+            int v = atoi(val);
+            if (v < 10) v = 10;
+            if (v > MAX_SECONDS) v = MAX_SECONDS;
+            cfg.max_duration = v;
         }
         /* old "key" and "autopaste" entries silently ignored */
     }
@@ -240,7 +249,9 @@ static void *record_thread(void *arg) {
     }
 
     pcm_pos = 0;
-    while (recording && pcm_pos + period <= (snd_pcm_uframes_t)BUF_SAMPLES) {
+    int warned = 0;
+    size_t max_samples = (size_t)(SAMPLE_RATE * cfg.max_duration);
+    while (recording && pcm_pos + period <= (snd_pcm_uframes_t)max_samples) {
         snd_pcm_sframes_t n = snd_pcm_readi(pcm, pcm_buf + pcm_pos, period);
         if (n == -EPIPE) {
             snd_pcm_prepare(pcm);
@@ -251,6 +262,17 @@ static void *record_thread(void *arg) {
             break;
         }
         pcm_pos += (size_t)n;
+        if (!warned && pcm_pos >= (size_t)(SAMPLE_RATE * (cfg.max_duration - 10))) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "Recording limit approaching (max_duration=%ds)",
+                     cfg.max_duration);
+            notify(msg);
+            warned = 1;
+        }
+    }
+    if (pcm_pos + period > (snd_pcm_uframes_t)max_samples) {
+        notify("Recording limit reached — set max_duration in /etc/dictator.conf to increase");
     }
 
     snd_pcm_close(pcm);
@@ -259,8 +281,8 @@ static void *record_thread(void *arg) {
 
 /* ── WAV builder (in-memory) ────────────────────────────────────────── */
 
-static size_t build_wav(uint8_t **out) {
-    size_t data_bytes = pcm_pos * FRAME_SIZE;
+static size_t build_wav(int16_t *samples, size_t num_samples, uint8_t **out) {
+    size_t data_bytes = num_samples * FRAME_SIZE;
     size_t total = 44 + data_bytes;
     uint8_t *wav = malloc(total);
     if (!wav) return 0;
@@ -282,7 +304,7 @@ static size_t build_wav(uint8_t **out) {
     u16 = 16;                        memcpy(wav + 34, &u16, 2); /* bits/sample */
     memcpy(wav + 36, "data", 4);
     u32 = (uint32_t)data_bytes;      memcpy(wav + 40, &u32, 4);
-    memcpy(wav + 44, pcm_buf, data_bytes);
+    memcpy(wav + 44, samples, data_bytes);
 
     *out = wav;
     return total;
@@ -337,7 +359,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
     CURLcode res = curl_easy_perform(curl);
 
@@ -413,22 +435,43 @@ static void handle_recording_done(int autopaste) {
     printf("dictator: captured %zu samples (%.1fs)\n",
            pcm_pos, (double)pcm_pos / SAMPLE_RATE);
 
-    uint8_t *wav;
-    size_t wav_len = build_wav(&wav);
-    if (!wav_len) { notify("WAV build failed"); return; }
+    size_t nchunks = (pcm_pos + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES;
+    char result[16384] = "";
+    size_t result_len = 0;
 
-    char *text = transcribe(wav, wav_len);
-    free(wav);
+    for (size_t i = 0; i < nchunks; i++) {
+        size_t offset = i * CHUNK_SAMPLES;
+        size_t chunk_samples = pcm_pos - offset;
+        if (chunk_samples > CHUNK_SAMPLES) chunk_samples = CHUNK_SAMPLES;
 
-    if (text && strlen(text) > 0) {
-        paste_text(text, autopaste);
+        uint8_t *wav;
+        size_t wav_len = build_wav(pcm_buf + offset, chunk_samples, &wav);
+        if (!wav_len) { notify("WAV build failed"); return; }
+
+        char *text = transcribe(wav, wav_len);
+        free(wav);
+
+        if (text && strlen(text) > 0) {
+            if (result_len > 0 && result_len + 1 < sizeof(result)) {
+                result[result_len++] = ' ';
+            }
+            size_t tlen = strlen(text);
+            if (result_len + tlen < sizeof(result)) {
+                memcpy(result + result_len, text, tlen);
+                result_len += tlen;
+                result[result_len] = '\0';
+            }
+        }
+        free(text);
+    }
+
+    if (result_len > 0) {
+        paste_text(result, autopaste);
         notify(autopaste ? "Done — pasted"
                          : "Done — copied to clipboard");
-        printf("dictator: %s\n", text);
-        free(text);
+        printf("dictator: %s\n", result);
     } else {
         notify("No text returned");
-        free(text);
     }
 }
 

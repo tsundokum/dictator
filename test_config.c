@@ -31,6 +31,7 @@ static void reset_cfg(void) {
     snprintf(cfg.paste_key.key_name, sizeof(cfg.paste_key.key_name), "F1");
     cfg.paste_key.mod_mask = MOD_SHIFT;
     cfg.notify = 1;
+    cfg.max_duration = MAX_SECONDS;
 }
 
 /* Write content to a temp file, load it, then remove */
@@ -220,6 +221,29 @@ static void test_no_equals_ignored(void) {
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "defaults preserved");
 }
 
+static void test_max_duration_default(void) {
+    printf("test_max_duration_default\n");
+    reset_cfg();
+    int rc = load_config_file("/tmp/nonexistent_dictator.conf");
+    (void)rc;
+    ASSERT(cfg.max_duration == 300, "default max_duration is 300");
+}
+
+static void test_max_duration_custom(void) {
+    printf("test_max_duration_custom\n");
+    load_from_string("max_duration = 120\n");
+    ASSERT(cfg.max_duration == 120, "max_duration set to 120");
+}
+
+static void test_max_duration_clamped(void) {
+    printf("test_max_duration_clamped\n");
+    load_from_string("max_duration = 5\n");
+    ASSERT(cfg.max_duration == 10, "max_duration clamped to 10 (lower bound)");
+
+    load_from_string("max_duration = 999\n");
+    ASSERT(cfg.max_duration == 300, "max_duration clamped to 300 (upper bound)");
+}
+
 int main(void) {
     test_defaults();
     test_simple_copy_key();
@@ -242,6 +266,9 @@ int main(void) {
     test_old_config_ignored();
     test_unknown_keys_ignored();
     test_no_equals_ignored();
+    test_max_duration_default();
+    test_max_duration_custom();
+    test_max_duration_clamped();
 
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
