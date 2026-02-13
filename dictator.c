@@ -1,6 +1,6 @@
 /*
  * dictator — hold a hotkey to dictate, release to transcribe
- * Build: gcc -O2 -Wall -Wextra -o dictator dictator.c -lX11 -lasound -lcurl -lpthread
+ * Build: gcc -O2 -Wall -Wextra -DUSE_X11 -DUSE_EVDEV -o dictator dictator.c -lX11 -lasound -lcurl -lpthread -levdev
  */
 
 #include <stdio.h>
@@ -10,9 +10,22 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <signal.h>
+#include <ctype.h>
+
+#ifdef USE_X11
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
+#endif
+
+#ifdef USE_EVDEV
+#include <libevdev/libevdev.h>
+#include <linux/input-event-codes.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <poll.h>
+#endif
+
 #include <alsa/asoundlib.h>
 #include <curl/curl.h>
 
@@ -31,11 +44,36 @@ static atomic_int recording;       /* flag: 1 = keep recording */
 
 static char api_key[1024];
 
+/* ── Backend-agnostic modifier flags ──────────────────────────────── */
+
+#define MOD_SHIFT  (1 << 0)
+#define MOD_CTRL   (1 << 1)
+#define MOD_ALT    (1 << 2)
+#define MOD_SUPER  (1 << 3)
+
+/* ── Backend detection ────────────────────────────────────────────── */
+
+enum backend { BACKEND_X11, BACKEND_EVDEV };
+static enum backend active_backend;
+
+static enum backend detect_backend(void) {
+    const char *st = getenv("XDG_SESSION_TYPE");
+    if (st && strcmp(st, "wayland") == 0) {
+#ifdef USE_EVDEV
+        return BACKEND_EVDEV;
+#else
+        fprintf(stderr, "dictator: Wayland detected but built without evdev support\n");
+        return BACKEND_X11;
+#endif
+    }
+    return BACKEND_X11;
+}
+
 /* ── Config ─────────────────────────────────────────────────────────── */
 
 struct hotkey {
-    char     key_name[64];    /* X11 keysym name, e.g. "F1" */
-    unsigned mod_mask;        /* modifier mask, e.g. ShiftMask */
+    char     key_name[64];    /* key name, e.g. "F1" */
+    unsigned mod_mask;        /* modifier mask using MOD_* flags */
 };
 
 static struct {
@@ -44,7 +82,7 @@ static struct {
     int           notify;     /* 1 = show desktop notifications */
 } cfg = {
     .copy_key  = { .key_name = "F1", .mod_mask = 0 },
-    .paste_key = { .key_name = "F1", .mod_mask = ShiftMask },
+    .paste_key = { .key_name = "F1", .mod_mask = MOD_SHIFT },
     .notify    = 1,
 };
 
@@ -57,15 +95,15 @@ static void parse_hotkey(const char *val, struct hotkey *hk) {
     char *rest = tmp;
     for (;;) {
         if (strncasecmp(rest, "shift+", 6) == 0) {
-            hk->mod_mask |= ShiftMask; rest += 6;
+            hk->mod_mask |= MOD_SHIFT; rest += 6;
         } else if (strncasecmp(rest, "ctrl+", 5) == 0) {
-            hk->mod_mask |= ControlMask; rest += 5;
+            hk->mod_mask |= MOD_CTRL; rest += 5;
         } else if (strncasecmp(rest, "control+", 8) == 0) {
-            hk->mod_mask |= ControlMask; rest += 8;
+            hk->mod_mask |= MOD_CTRL; rest += 8;
         } else if (strncasecmp(rest, "alt+", 4) == 0) {
-            hk->mod_mask |= Mod1Mask; rest += 4;
+            hk->mod_mask |= MOD_ALT; rest += 4;
         } else if (strncasecmp(rest, "super+", 6) == 0) {
-            hk->mod_mask |= Mod4Mask; rest += 6;
+            hk->mod_mask |= MOD_SUPER; rest += 6;
         } else {
             break;
         }
@@ -336,8 +374,10 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
 /* ── Clipboard + paste ──────────────────────────────────────────────── */
 
 static void paste_text(const char *text, int autopaste) {
-    /* Copy to clipboard via xclip */
-    FILE *p = popen("xclip -selection clipboard", "w");
+    /* Copy to clipboard — backend-dependent */
+    const char *clip_cmd = (active_backend == BACKEND_EVDEV)
+        ? "wl-copy" : "xclip -selection clipboard";
+    FILE *p = popen(clip_cmd, "w");
     if (p) {
         fwrite(text, 1, strlen(text), p);
         pclose(p);
@@ -345,8 +385,12 @@ static void paste_text(const char *text, int autopaste) {
     if (!autopaste) return;
     /* Small delay to ensure clipboard is set */
     usleep(50000);
-    /* Simulate Ctrl+V */
-    if (run("xdotool key --clearmodifiers ctrl+v")) { /* best effort */ }
+    /* Simulate Ctrl+V — backend-dependent */
+    if (active_backend == BACKEND_EVDEV) {
+        if (run("ydotool key 29:1 47:1 47:0 29:0")) { /* best effort */ }
+    } else {
+        if (run("xdotool key --clearmodifiers ctrl+v")) { /* best effort */ }
+    }
 }
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
@@ -358,38 +402,77 @@ static void handle_signal(int sig) {
     quit = 1;
 }
 
+/* ── Shared post-recording logic ─────────────────────────────────────── */
+
+static void handle_recording_done(int autopaste) {
+    if (pcm_pos == 0) {
+        notify("No audio captured");
+        return;
+    }
+
+    printf("dictator: captured %zu samples (%.1fs)\n",
+           pcm_pos, (double)pcm_pos / SAMPLE_RATE);
+
+    uint8_t *wav;
+    size_t wav_len = build_wav(&wav);
+    if (!wav_len) { notify("WAV build failed"); return; }
+
+    char *text = transcribe(wav, wav_len);
+    free(wav);
+
+    if (text && strlen(text) > 0) {
+        paste_text(text, autopaste);
+        notify(autopaste ? "Done — pasted"
+                         : "Done — copied to clipboard");
+        printf("dictator: %s\n", text);
+        free(text);
+    } else {
+        notify("No text returned");
+        free(text);
+    }
+}
+
+/* ── Hotkey display helper ───────────────────────────────────────────── */
+
+static void print_hotkey(const struct hotkey *hk, char *buf, size_t len) {
+    snprintf(buf, len, "%s%s%s%s%s",
+             (hk->mod_mask & MOD_SHIFT) ? "Shift+" : "",
+             (hk->mod_mask & MOD_CTRL)  ? "Ctrl+"  : "",
+             (hk->mod_mask & MOD_ALT)   ? "Alt+"   : "",
+             (hk->mod_mask & MOD_SUPER) ? "Super+" : "",
+             hk->key_name);
+}
+
 /* ── X11 hotkey grab helpers ─────────────────────────────────────────── */
+
+#ifdef USE_X11
+
+static unsigned mod_to_x11(unsigned mod) {
+    unsigned x = 0;
+    if (mod & MOD_SHIFT) x |= ShiftMask;
+    if (mod & MOD_CTRL)  x |= ControlMask;
+    if (mod & MOD_ALT)   x |= Mod1Mask;
+    if (mod & MOD_SUPER) x |= Mod4Mask;
+    return x;
+}
 
 static const unsigned int lock_combos[] = {0, Mod2Mask, LockMask, Mod2Mask | LockMask};
 #define N_LOCK_COMBOS (sizeof(lock_combos)/sizeof(lock_combos[0]))
 
 static void grab_hotkey(Display *dpy, Window root, KeyCode kc, unsigned mod) {
+    unsigned xmod = mod_to_x11(mod);
     for (size_t i = 0; i < N_LOCK_COMBOS; i++)
-        XGrabKey(dpy, kc, mod | lock_combos[i], root,
+        XGrabKey(dpy, kc, xmod | lock_combos[i], root,
                  False, GrabModeAsync, GrabModeAsync);
 }
 
 static void ungrab_hotkey(Display *dpy, Window root, KeyCode kc, unsigned mod) {
+    unsigned xmod = mod_to_x11(mod);
     for (size_t i = 0; i < N_LOCK_COMBOS; i++)
-        XUngrabKey(dpy, kc, mod | lock_combos[i], root);
+        XUngrabKey(dpy, kc, xmod | lock_combos[i], root);
 }
 
-static void print_hotkey(const struct hotkey *hk, char *buf, size_t len) {
-    snprintf(buf, len, "%s%s%s%s%s",
-             (hk->mod_mask & ShiftMask)   ? "Shift+" : "",
-             (hk->mod_mask & ControlMask) ? "Ctrl+"  : "",
-             (hk->mod_mask & Mod1Mask)    ? "Alt+"   : "",
-             (hk->mod_mask & Mod4Mask)    ? "Super+" : "",
-             hk->key_name);
-}
-
-/* ── Main ───────────────────────────────────────────────────────────── */
-
-int main(void) {
-    load_config();
-    if (load_env() < 0) return 1;
-    curl_global_init(CURL_GLOBAL_ALL);
-
+static int run_x11(void) {
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "dictator: cannot open display\n"); return 1; }
     XkbSetDetectableAutoRepeat(dpy, True, NULL);
@@ -398,12 +481,14 @@ int main(void) {
     KeySym copy_ks = XStringToKeysym(cfg.copy_key.key_name);
     if (copy_ks == NoSymbol) {
         fprintf(stderr, "dictator: unknown copy_key '%s'\n", cfg.copy_key.key_name);
+        XCloseDisplay(dpy);
         return 1;
     }
     /* Resolve paste_key */
     KeySym paste_ks = XStringToKeysym(cfg.paste_key.key_name);
     if (paste_ks == NoSymbol) {
         fprintf(stderr, "dictator: unknown paste_key '%s'\n", cfg.paste_key.key_name);
+        XCloseDisplay(dpy);
         return 1;
     }
 
@@ -411,22 +496,22 @@ int main(void) {
     KeyCode copy_kc  = XKeysymToKeycode(dpy, copy_ks);
     KeyCode paste_kc = XKeysymToKeycode(dpy, paste_ks);
 
+    unsigned copy_xmod  = mod_to_x11(cfg.copy_key.mod_mask);
+    unsigned paste_xmod = mod_to_x11(cfg.paste_key.mod_mask);
+
     grab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
     grab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
-
-    signal(SIGINT,  handle_signal);
-    signal(SIGTERM, handle_signal);
 
     char copy_str[128], paste_str[128];
     print_hotkey(&cfg.copy_key,  copy_str,  sizeof(copy_str));
     print_hotkey(&cfg.paste_key, paste_str, sizeof(paste_str));
-    printf("dictator: ready — hold %s to copy, %s to paste\n",
+    printf("dictator: ready (X11) — hold %s to copy, %s to paste\n",
            copy_str, paste_str);
 
     pthread_t tid;
     int is_recording = 0;
-    int active_autopaste = 0;  /* whether current recording should autopaste */
-    KeyCode active_kc = 0;    /* keycode that started recording */
+    int active_autopaste = 0;
+    KeyCode active_kc = 0;
 
     while (!quit) {
         XEvent ev;
@@ -438,11 +523,11 @@ int main(void) {
             unsigned clean = ev.xkey.state & ~(Mod2Mask | LockMask);
 
             if (ev.xkey.keycode == paste_kc &&
-                clean == cfg.paste_key.mod_mask) {
+                clean == paste_xmod) {
                 active_autopaste = 1;
                 active_kc = paste_kc;
             } else if (ev.xkey.keycode == copy_kc &&
-                       clean == cfg.copy_key.mod_mask) {
+                       clean == copy_xmod) {
                 active_autopaste = 0;
                 active_kc = copy_kc;
             } else {
@@ -465,32 +550,7 @@ int main(void) {
             recording = 0;
             pthread_join(tid, NULL);
             is_recording = 0;
-
-            if (pcm_pos == 0) {
-                notify("No audio captured");
-                continue;
-            }
-
-            printf("dictator: captured %zu samples (%.1fs)\n",
-                   pcm_pos, (double)pcm_pos / SAMPLE_RATE);
-
-            uint8_t *wav;
-            size_t wav_len = build_wav(&wav);
-            if (!wav_len) { notify("WAV build failed"); continue; }
-
-            char *text = transcribe(wav, wav_len);
-            free(wav);
-
-            if (text && strlen(text) > 0) {
-                paste_text(text, active_autopaste);
-                notify(active_autopaste ? "Done — pasted"
-                                        : "Done — copied to clipboard");
-                printf("dictator: %s\n", text);
-                free(text);
-            } else {
-                notify("No text returned");
-                free(text);
-            }
+            handle_recording_done(active_autopaste);
         }
     }
 
@@ -500,8 +560,244 @@ int main(void) {
     }
     ungrab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
     ungrab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
-    curl_global_cleanup();
     XCloseDisplay(dpy);
-    printf("dictator: shutdown\n");
     return 0;
+}
+
+#endif /* USE_X11 */
+
+/* ── Evdev backend ───────────────────────────────────────────────────── */
+
+#ifdef USE_EVDEV
+
+/* Key name -> evdev keycode lookup table */
+static const struct {
+    const char *name;
+    unsigned    code;
+} evdev_key_table[] = {
+    {"F1",  KEY_F1},  {"F2",  KEY_F2},  {"F3",  KEY_F3},  {"F4",  KEY_F4},
+    {"F5",  KEY_F5},  {"F6",  KEY_F6},  {"F7",  KEY_F7},  {"F8",  KEY_F8},
+    {"F9",  KEY_F9},  {"F10", KEY_F10}, {"F11", KEY_F11}, {"F12", KEY_F12},
+    {"space", KEY_SPACE}, {"Space", KEY_SPACE},
+    {"Return", KEY_ENTER}, {"return", KEY_ENTER},
+    {"Tab", KEY_TAB}, {"tab", KEY_TAB},
+    {"Escape", KEY_ESC}, {"escape", KEY_ESC},
+    {"BackSpace", KEY_BACKSPACE}, {"backspace", KEY_BACKSPACE},
+    {"Delete", KEY_DELETE}, {"delete", KEY_DELETE},
+    {"Home", KEY_HOME}, {"End", KEY_END},
+    {"Prior", KEY_PAGEUP}, {"Next", KEY_PAGEDOWN},
+    {"Up", KEY_UP}, {"Down", KEY_DOWN}, {"Left", KEY_LEFT}, {"Right", KEY_RIGHT},
+    {"a", KEY_A}, {"b", KEY_B}, {"c", KEY_C}, {"d", KEY_D},
+    {"e", KEY_E}, {"f", KEY_F}, {"g", KEY_G}, {"h", KEY_H},
+    {"i", KEY_I}, {"j", KEY_J}, {"k", KEY_K}, {"l", KEY_L},
+    {"m", KEY_M}, {"n", KEY_N}, {"o", KEY_O}, {"p", KEY_P},
+    {"q", KEY_Q}, {"r", KEY_R}, {"s", KEY_S}, {"t", KEY_T},
+    {"u", KEY_U}, {"v", KEY_V}, {"w", KEY_W}, {"x", KEY_X},
+    {"y", KEY_Y}, {"z", KEY_Z},
+    {"0", KEY_0}, {"1", KEY_1}, {"2", KEY_2}, {"3", KEY_3},
+    {"4", KEY_4}, {"5", KEY_5}, {"6", KEY_6}, {"7", KEY_7},
+    {"8", KEY_8}, {"9", KEY_9},
+    {"minus", KEY_MINUS}, {"equal", KEY_EQUAL},
+    {"bracketleft", KEY_LEFTBRACE}, {"bracketright", KEY_RIGHTBRACE},
+    {"semicolon", KEY_SEMICOLON}, {"apostrophe", KEY_APOSTROPHE},
+    {"grave", KEY_GRAVE}, {"backslash", KEY_BACKSLASH},
+    {"comma", KEY_COMMA}, {"period", KEY_DOT}, {"slash", KEY_SLASH},
+    {NULL, 0}
+};
+
+static int keyname_to_evdev(const char *name) {
+    for (int i = 0; evdev_key_table[i].name; i++) {
+        if (strcasecmp(name, evdev_key_table[i].name) == 0)
+            return (int)evdev_key_table[i].code;
+    }
+    return -1;
+}
+
+/* Evdev keyboard device discovery */
+static struct libevdev *open_keyboard_device(void) {
+    DIR *dir = opendir("/dev/input");
+    if (!dir) {
+        fprintf(stderr, "dictator: cannot open /dev/input\n");
+        return NULL;
+    }
+
+    struct libevdev *dev = NULL;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "event", 5) != 0) continue;
+
+        char path[280];
+        snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+
+        struct libevdev *candidate = NULL;
+        if (libevdev_new_from_fd(fd, &candidate) < 0) {
+            close(fd);
+            continue;
+        }
+
+        /* Pick first device with EV_KEY + KEY_A (filters mice, power buttons) */
+        if (libevdev_has_event_type(candidate, EV_KEY) &&
+            libevdev_has_event_code(candidate, EV_KEY, KEY_A)) {
+            dev = candidate;
+            break;
+        }
+
+        libevdev_free(candidate);
+        close(fd);
+    }
+    closedir(dir);
+
+    if (!dev)
+        fprintf(stderr, "dictator: no keyboard device found in /dev/input/\n"
+                        "  Ensure you are in the 'input' group: sudo usermod -aG input $USER\n");
+    return dev;
+}
+
+/* Evdev modifier state tracking */
+static unsigned evdev_mod_state;
+
+static void update_mod_state(unsigned code, int pressed) {
+    unsigned bit = 0;
+    switch (code) {
+        case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: bit = MOD_SHIFT; break;
+        case KEY_LEFTCTRL:  case KEY_RIGHTCTRL:  bit = MOD_CTRL;  break;
+        case KEY_LEFTALT:   case KEY_RIGHTALT:   bit = MOD_ALT;   break;
+        case KEY_LEFTMETA:  case KEY_RIGHTMETA:  bit = MOD_SUPER; break;
+    }
+    if (bit) {
+        if (pressed) evdev_mod_state |= bit; else evdev_mod_state &= ~bit;
+    }
+}
+
+static int run_evdev(void) {
+    /* Resolve keycodes from config */
+    int copy_code = keyname_to_evdev(cfg.copy_key.key_name);
+    if (copy_code < 0) {
+        fprintf(stderr, "dictator: unknown copy_key '%s' for evdev\n",
+                cfg.copy_key.key_name);
+        return 1;
+    }
+    int paste_code = keyname_to_evdev(cfg.paste_key.key_name);
+    if (paste_code < 0) {
+        fprintf(stderr, "dictator: unknown paste_key '%s' for evdev\n",
+                cfg.paste_key.key_name);
+        return 1;
+    }
+
+    struct libevdev *dev = open_keyboard_device();
+    if (!dev) return 1;
+
+    int fd = libevdev_get_fd(dev);
+
+    char copy_str[128], paste_str[128];
+    print_hotkey(&cfg.copy_key,  copy_str,  sizeof(copy_str));
+    print_hotkey(&cfg.paste_key, paste_str, sizeof(paste_str));
+    printf("dictator: ready (evdev/Wayland) — hold %s to copy, %s to paste\n",
+           copy_str, paste_str);
+
+    pthread_t tid;
+    int is_recording = 0;
+    int active_autopaste = 0;
+    int active_code = 0;
+
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+    while (!quit) {
+        int ret = poll(&pfd, 1, 200); /* 200ms timeout to check quit */
+        if (ret <= 0) continue;
+
+        struct input_event ev;
+        int rc;
+        while ((rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev))
+               == LIBEVDEV_READ_STATUS_SUCCESS ||
+               rc == LIBEVDEV_READ_STATUS_SYNC) {
+            if (ev.type != EV_KEY) continue;
+
+            /* Update modifier state for all key events */
+            update_mod_state(ev.code, ev.value != 0);
+
+            if (ev.value == 1 && !is_recording) {
+                /* Key press (not repeat) */
+                int matched = 0;
+                if ((int)ev.code == paste_code &&
+                    evdev_mod_state == cfg.paste_key.mod_mask) {
+                    active_autopaste = 1;
+                    active_code = paste_code;
+                    matched = 1;
+                } else if ((int)ev.code == copy_code &&
+                           evdev_mod_state == cfg.copy_key.mod_mask) {
+                    active_autopaste = 0;
+                    active_code = copy_code;
+                    matched = 1;
+                }
+                if (!matched) continue;
+
+                is_recording = 1;
+                recording = 1;
+                notify("Recording...");
+                if (pthread_create(&tid, NULL, record_thread, NULL) != 0) {
+                    perror("dictator: pthread_create");
+                    notify("Failed to start recording");
+                    is_recording = 0;
+                    recording = 0;
+                    continue;
+                }
+            }
+            else if (ev.value == 0 && is_recording &&
+                     (int)ev.code == active_code) {
+                /* Key release */
+                recording = 0;
+                pthread_join(tid, NULL);
+                is_recording = 0;
+                handle_recording_done(active_autopaste);
+            }
+        }
+    }
+
+    if (is_recording) {
+        recording = 0;
+        pthread_join(tid, NULL);
+    }
+    libevdev_free(dev);
+    close(fd);
+    return 0;
+}
+
+#endif /* USE_EVDEV */
+
+/* ── Main ───────────────────────────────────────────────────────────── */
+
+int main(void) {
+    load_config();
+    if (load_env() < 0) return 1;
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    signal(SIGINT,  handle_signal);
+    signal(SIGTERM, handle_signal);
+
+    active_backend = detect_backend();
+
+    int rc = 1;
+    switch (active_backend) {
+#ifdef USE_X11
+    case BACKEND_X11:
+        rc = run_x11();
+        break;
+#endif
+#ifdef USE_EVDEV
+    case BACKEND_EVDEV:
+        rc = run_evdev();
+        break;
+#endif
+    default:
+        fprintf(stderr, "dictator: no backend available for this session type\n");
+        break;
+    }
+
+    curl_global_cleanup();
+    printf("dictator: shutdown\n");
+    return rc;
 }

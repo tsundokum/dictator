@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <X11/Xlib.h>
 
 /* Pull in the config struct and parser from dictator.c.
  * We only need the config bits — stub out everything else. */
@@ -30,7 +29,7 @@ static void reset_cfg(void) {
     snprintf(cfg.copy_key.key_name, sizeof(cfg.copy_key.key_name), "F1");
     cfg.copy_key.mod_mask = 0;
     snprintf(cfg.paste_key.key_name, sizeof(cfg.paste_key.key_name), "F1");
-    cfg.paste_key.mod_mask = ShiftMask;
+    cfg.paste_key.mod_mask = MOD_SHIFT;
     cfg.notify = 1;
 }
 
@@ -55,7 +54,7 @@ static void test_defaults(void) {
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "default copy_key is F1");
     ASSERT(cfg.copy_key.mod_mask == 0, "default copy_key mod_mask is 0");
     ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "default paste_key is F1");
-    ASSERT(cfg.paste_key.mod_mask == ShiftMask, "default paste_key mod_mask is ShiftMask");
+    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "default paste_key mod_mask is MOD_SHIFT");
     ASSERT(cfg.notify == 1, "default notify is 1");
 }
 
@@ -70,49 +69,49 @@ static void test_shift_copy_key(void) {
     printf("test_shift_copy_key\n");
     load_from_string("copy_key = shift+F1\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key name is F1");
-    ASSERT(cfg.copy_key.mod_mask == ShiftMask, "mod_mask is ShiftMask");
+    ASSERT(cfg.copy_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
 }
 
 static void test_ctrl_copy_key(void) {
     printf("test_ctrl_copy_key\n");
     load_from_string("copy_key = ctrl+space\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "space") == 0, "copy_key is space");
-    ASSERT(cfg.copy_key.mod_mask == ControlMask, "mod_mask is ControlMask");
+    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "mod_mask is MOD_CTRL");
 }
 
 static void test_control_alias(void) {
     printf("test_control_alias\n");
     load_from_string("copy_key = control+F1\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == ControlMask, "control+ maps to ControlMask");
+    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "control+ maps to MOD_CTRL");
 }
 
 static void test_alt_copy_key(void) {
     printf("test_alt_copy_key\n");
     load_from_string("copy_key = alt+a\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "a") == 0, "copy_key is a");
-    ASSERT(cfg.copy_key.mod_mask == Mod1Mask, "mod_mask is Mod1Mask");
+    ASSERT(cfg.copy_key.mod_mask == MOD_ALT, "mod_mask is MOD_ALT");
 }
 
 static void test_super_copy_key(void) {
     printf("test_super_copy_key\n");
     load_from_string("copy_key = super+F1\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == Mod4Mask, "mod_mask is Mod4Mask");
+    ASSERT(cfg.copy_key.mod_mask == MOD_SUPER, "mod_mask is MOD_SUPER");
 }
 
 static void test_multiple_modifiers(void) {
     printf("test_multiple_modifiers\n");
     load_from_string("copy_key = ctrl+shift+F2\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F2") == 0, "copy_key is F2");
-    ASSERT(cfg.copy_key.mod_mask == (ControlMask | ShiftMask), "ctrl+shift");
+    ASSERT(cfg.copy_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "ctrl+shift");
 }
 
 static void test_case_insensitive_modifiers(void) {
     printf("test_case_insensitive_modifiers\n");
     load_from_string("copy_key = SHIFT+CTRL+F3\n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F3") == 0, "copy_key is F3");
-    ASSERT(cfg.copy_key.mod_mask == (ShiftMask | ControlMask), "SHIFT+CTRL parsed");
+    ASSERT(cfg.copy_key.mod_mask == (MOD_SHIFT | MOD_CTRL), "SHIFT+CTRL parsed");
 }
 
 static void test_simple_paste_key(void) {
@@ -126,14 +125,14 @@ static void test_shift_paste_key(void) {
     printf("test_shift_paste_key\n");
     load_from_string("paste_key = shift+F2\n");
     ASSERT(strcmp(cfg.paste_key.key_name, "F2") == 0, "paste_key name is F2");
-    ASSERT(cfg.paste_key.mod_mask == ShiftMask, "mod_mask is ShiftMask");
+    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
 }
 
 static void test_paste_key_multiple_modifiers(void) {
     printf("test_paste_key_multiple_modifiers\n");
     load_from_string("paste_key = ctrl+alt+F4\n");
     ASSERT(strcmp(cfg.paste_key.key_name, "F4") == 0, "paste_key is F4");
-    ASSERT(cfg.paste_key.mod_mask == (ControlMask | Mod1Mask), "ctrl+alt");
+    ASSERT(cfg.paste_key.mod_mask == (MOD_CTRL | MOD_ALT), "ctrl+alt");
 }
 
 static void test_notify_false(void) {
@@ -163,7 +162,7 @@ static void test_whitespace_handling(void) {
     printf("test_whitespace_handling\n");
     load_from_string("  copy_key   =   shift+F9  \n");
     ASSERT(strcmp(cfg.copy_key.key_name, "F9") == 0, "copy_key with whitespace");
-    ASSERT(cfg.copy_key.mod_mask == ShiftMask, "modifier with whitespace");
+    ASSERT(cfg.copy_key.mod_mask == MOD_SHIFT, "modifier with whitespace");
 }
 
 static void test_all_options(void) {
@@ -174,9 +173,9 @@ static void test_all_options(void) {
         "notify = false\n"
     );
     ASSERT(strcmp(cfg.copy_key.key_name, "F4") == 0, "copy_key is F4");
-    ASSERT(cfg.copy_key.mod_mask == Mod1Mask, "copy_key alt modifier");
+    ASSERT(cfg.copy_key.mod_mask == MOD_ALT, "copy_key alt modifier");
     ASSERT(strcmp(cfg.paste_key.key_name, "F4") == 0, "paste_key is F4");
-    ASSERT(cfg.paste_key.mod_mask == Mod4Mask, "paste_key super modifier");
+    ASSERT(cfg.paste_key.mod_mask == MOD_SUPER, "paste_key super modifier");
     ASSERT(cfg.notify == 0, "notify off");
 }
 
@@ -187,9 +186,9 @@ static void test_both_keys_with_modifiers(void) {
         "paste_key = ctrl+shift+F1\n"
     );
     ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == ControlMask, "copy_key ctrl");
+    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "copy_key ctrl");
     ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "paste_key is F1");
-    ASSERT(cfg.paste_key.mod_mask == (ControlMask | ShiftMask), "paste_key ctrl+shift");
+    ASSERT(cfg.paste_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "paste_key ctrl+shift");
 }
 
 static void test_old_config_ignored(void) {
@@ -203,7 +202,7 @@ static void test_old_config_ignored(void) {
     ASSERT(strcmp(cfg.copy_key.key_name, "F3") == 0, "copy_key parsed despite old entries");
     /* paste_key unchanged from defaults */
     ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "paste_key stays default");
-    ASSERT(cfg.paste_key.mod_mask == ShiftMask, "paste_key mod stays default");
+    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "paste_key mod stays default");
 }
 
 static void test_unknown_keys_ignored(void) {

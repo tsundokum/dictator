@@ -1,12 +1,13 @@
 CC = gcc
-CFLAGS = -O2 -Wall -Wextra
-LIBS = -lX11 -lasound -lcurl -lpthread
+CFLAGS = -O2 -Wall -Wextra $(shell pkg-config --cflags libevdev)
+BACKEND_FLAGS = -DUSE_X11 -DUSE_EVDEV
+LIBS = -lX11 -lasound -lcurl -lpthread $(shell pkg-config --libs libevdev)
 
 dictator: dictator.c
-	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
+	$(CC) $(CFLAGS) $(BACKEND_FLAGS) -o $@ $< $(LIBS)
 
 test_config: test_config.c dictator.c
-	$(CC) $(CFLAGS) -o $@ test_config.c $(LIBS)
+	$(CC) $(CFLAGS) $(BACKEND_FLAGS) -o $@ test_config.c $(LIBS)
 
 test: test_config
 	./test_config
@@ -29,6 +30,14 @@ install: dictator
 	systemctl --user daemon-reload
 	systemctl --user enable dictator.service
 	@echo "Start with: systemctl --user start dictator.service"
+	@echo ""
+	@if [ "$$(echo $$XDG_SESSION_TYPE)" = "wayland" ]; then \
+		command -v wl-copy  >/dev/null || echo "Warning: wl-copy not found — install wl-clipboard: sudo apt install wl-clipboard"; \
+		command -v ydotool  >/dev/null || echo "Warning: ydotool not found — sudo apt install ydotool"; \
+	else \
+		command -v xclip   >/dev/null || echo "Warning: xclip not found — sudo apt install xclip"; \
+		command -v xdotool >/dev/null || echo "Warning: xdotool not found — sudo apt install xdotool"; \
+	fi
 
 uninstall:
 	-systemctl --user stop dictator.service
