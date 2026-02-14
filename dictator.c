@@ -175,16 +175,16 @@ static int load_env(void) {
     if (!f) { fprintf(stderr, "dictator: cannot open .env\n"); return -1; }
     char line[256];
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "GROQ=", 5) == 0) {
-            char *val = line + 5;
+        if (strncmp(line, "ASSEMBLYAI=", 11) == 0) {
+            char *val = line + 11;
             val[strcspn(val, "\r\n")] = '\0';
-            snprintf(api_key, sizeof(api_key), "Authorization: Bearer %s", val);
+            snprintf(api_key, sizeof(api_key), "Authorization: %s", val);
             fclose(f);
             return 0;
         }
     }
     fclose(f);
-    fprintf(stderr, "dictator: GROQ= not found in .env\n");
+    fprintf(stderr, "dictator: ASSEMBLYAI= not found in .env\n");
     return -1;
 }
 
@@ -326,71 +326,287 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userp) {
     return bytes;
 }
 
-/* ── Groq Whisper API call ──────────────────────────────────────────── */
+/* ── Minimal JSON string extraction ─────────────────────────────────── */
 
-static char *transcribe(uint8_t *wav, size_t wav_len) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+/* Decode a hex digit, returns -1 on invalid input */
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, api_key);
+/* Parse \uXXXX at *p (p points past the 'u'), returns codepoint, advances *p */
+static uint32_t parse_u_escape(char **p) {
+    uint32_t cp = 0;
+    for (int i = 0; i < 4; i++) {
+        int v = hexval((*p)[i]);
+        if (v < 0) return 0xFFFD;
+        cp = (cp << 4) | (uint32_t)v;
+    }
+    *p += 4;
+    return cp;
+}
 
-    curl_mime *mime = curl_mime_init(curl);
+/* Write a Unicode codepoint as UTF-8, returns number of bytes written */
+static size_t utf8_encode(uint32_t cp, char *out) {
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else if (cp < 0x110000) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    return utf8_encode(0xFFFD, out); /* replacement char */
+}
 
-    curl_mimepart *part = curl_mime_addpart(mime);
-    curl_mime_name(part, "file");
-    curl_mime_data(part, (char *)wav, wav_len);
-    curl_mime_filename(part, "audio.wav");
-    curl_mime_type(part, "audio/wav");
+/* Unescape a JSON string in-place: \uXXXX → UTF-8, \n, \t, etc. */
+static char *json_unescape(char *s) {
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r == '\\' && r[1]) {
+            r++;
+            switch (*r) {
+            case '"': case '\\': case '/': *w++ = *r++; break;
+            case 'n': *w++ = '\n'; r++; break;
+            case 't': *w++ = '\t'; r++; break;
+            case 'r': *w++ = '\r'; r++; break;
+            case 'b': *w++ = '\b'; r++; break;
+            case 'f': *w++ = '\f'; r++; break;
+            case 'u': {
+                r++; /* skip 'u' */
+                uint32_t cp = parse_u_escape(&r);
+                /* Handle surrogate pairs: \uD800-\uDBFF \uDC00-\uDFFF */
+                if (cp >= 0xD800 && cp <= 0xDBFF && r[0] == '\\' && r[1] == 'u') {
+                    r += 2; /* skip \u */
+                    uint32_t lo = parse_u_escape(&r);
+                    if (lo >= 0xDC00 && lo <= 0xDFFF)
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                }
+                w += utf8_encode(cp, w);
+                break;
+            }
+            default: *w++ = '\\'; *w++ = *r++; break;
+            }
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+    return s;
+}
 
-    part = curl_mime_addpart(mime);
-    curl_mime_name(part, "model");
-    curl_mime_data(part, "whisper-large-v3-turbo", CURL_ZERO_TERMINATED);
+/* Extract the string value for a given key from JSON.
+ * Looks for "key": "value" and returns a malloc'd copy of value (UTF-8).
+ * Returns NULL if not found. */
+static char *json_get_string(const char *json, const char *key) {
+    char needle[128];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = json;
+    while ((p = strstr(p, needle)) != NULL) {
+        p += strlen(needle);
+        /* skip whitespace */
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p == ':') break; /* found as key */
+        /* matched as value (e.g. "status": "error"), keep searching */
+    }
+    if (!p) return NULL;
+    p++; /* skip colon */
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == 'n' && strncmp(p, "null", 4) == 0) return NULL;
+    if (*p != '"') return NULL;
+    p++; /* skip opening quote */
+    const char *start = p;
+    while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
+    if (!*p) return NULL;
+    size_t len = (size_t)(p - start);
+    char *val = malloc(len + 1);
+    if (!val) return NULL;
+    memcpy(val, start, len);
+    val[len] = '\0';
+    return json_unescape(val);
+}
 
-    part = curl_mime_addpart(mime);
-    curl_mime_name(part, "response_format");
-    curl_mime_data(part, "text", CURL_ZERO_TERMINATED);
+/* ── AssemblyAI transcription API ──────────────────────────────────── */
 
-    struct response resp = {0};
-
-    curl_easy_setopt(curl, CURLOPT_URL,
-                     "https://api.groq.com/openai/v1/audio/transcriptions");
+/* Shared curl helper: perform request, check for errors, return response.
+ * Caller must free resp->data. Returns 0 on success, -1 on failure. */
+static int aai_request(CURL *curl, struct curl_slist *headers,
+                       struct response *resp, const char *label) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
     CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Network error: %s", curl_easy_strerror(res));
+        notify(msg);
+        fprintf(stderr, "dictator: %s curl: %s\n", label, curl_easy_strerror(res));
+        return -1;
+    }
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code < 200 || http_code >= 300) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "API error %ld (%s)", http_code, label);
+        notify(msg);
+        fprintf(stderr, "dictator: %s: %s\n", msg, resp->data ? resp->data : "");
+        return -1;
+    }
+    return 0;
+}
 
-    curl_mime_free(mime);
-    curl_slist_free_all(headers);
+static char *transcribe(uint8_t *wav, size_t wav_len) {
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, api_key);
+
+    /* ── Step 1: Upload audio ─────────────────────────────────────── */
+    CURL *curl = curl_easy_init();
+    if (!curl) { curl_slist_free_all(headers); return NULL; }
+
+    headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.assemblyai.com/v2/upload");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, (char *)wav);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)wav_len);
+
+    struct response resp = {0};
+    if (aai_request(curl, headers, &resp, "upload") < 0) {
+        free(resp.data);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        return NULL;
+    }
+
+    char *upload_url = json_get_string(resp.data, "upload_url");
+    free(resp.data);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) {
-        fprintf(stderr, "dictator: curl: %s\n", curl_easy_strerror(res));
-        free(resp.data);
+    if (!upload_url) {
+        notify("Upload failed: no URL returned");
+        curl_slist_free_all(headers);
         return NULL;
     }
-    if (http_code != 200) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "API error %ld", http_code);
-        notify(msg);
-        fprintf(stderr, "dictator: %s: %s\n", msg, resp.data ? resp.data : "");
+
+    /* ── Step 2: Submit transcription job ─────────────────────────── */
+    curl = curl_easy_init();
+    if (!curl) { free(upload_url); curl_slist_free_all(headers); return NULL; }
+
+    /* Replace Content-Type for JSON body */
+    curl_slist_free_all(headers);
+    headers = NULL;
+    headers = curl_slist_append(headers, api_key);
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"audio_url\": \"%s\", \"speech_models\": [\"universal-3-pro\", \"universal-2\"]}", upload_url);
+    free(upload_url);
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.assemblyai.com/v2/transcript");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+
+    resp = (struct response){0};
+    if (aai_request(curl, headers, &resp, "submit") < 0) {
         free(resp.data);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
         return NULL;
     }
+
+    char *transcript_id = json_get_string(resp.data, "id");
+    free(resp.data);
+    curl_easy_cleanup(curl);
+
+    if (!transcript_id) {
+        notify("Transcription submit failed: no ID returned");
+        curl_slist_free_all(headers);
+        return NULL;
+    }
+
+    /* ── Step 3: Poll for completion ──────────────────────────────── */
+    char poll_url[512];
+    snprintf(poll_url, sizeof(poll_url),
+             "https://api.assemblyai.com/v2/transcript/%s", transcript_id);
+    free(transcript_id);
+
+    /* Switch headers back (no Content-Type needed for GET) */
+    curl_slist_free_all(headers);
+    headers = NULL;
+    headers = curl_slist_append(headers, api_key);
+
+    char *result = NULL;
+    for (int attempt = 0; attempt < 120; attempt++) {
+        sleep(1);
+
+        curl = curl_easy_init();
+        if (!curl) break;
+
+        curl_easy_setopt(curl, CURLOPT_URL, poll_url);
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+
+        resp = (struct response){0};
+        if (aai_request(curl, headers, &resp, "poll") < 0) {
+            free(resp.data);
+            curl_easy_cleanup(curl);
+            break;
+        }
+
+        char *status = json_get_string(resp.data, "status");
+        if (status && strcmp(status, "completed") == 0) {
+            result = json_get_string(resp.data, "text");
+            free(status);
+            free(resp.data);
+            curl_easy_cleanup(curl);
+            break;
+        }
+        if (status && strcmp(status, "error") == 0) {
+            char *err = json_get_string(resp.data, "error");
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Transcription error: %s",
+                     err ? err : "unknown");
+            notify(msg);
+            fprintf(stderr, "dictator: %s\n", msg);
+            fprintf(stderr, "dictator: response: %s\n",
+                    resp.data ? resp.data : "(null)");
+            free(err);
+            free(status);
+            free(resp.data);
+            curl_easy_cleanup(curl);
+            break;
+        }
+        free(status);
+        free(resp.data);
+        curl_easy_cleanup(curl);
+    }
+
+    curl_slist_free_all(headers);
+
     /* Trim trailing whitespace */
-    if (resp.data) {
-        size_t len = strlen(resp.data);
-        while (len > 0 && (resp.data[len-1] == '\n' || resp.data[len-1] == '\r'
-                           || resp.data[len-1] == ' '))
-            resp.data[--len] = '\0';
+    if (result) {
+        size_t len = strlen(result);
+        while (len > 0 && (result[len-1] == '\n' || result[len-1] == '\r'
+                           || result[len-1] == ' '))
+            result[--len] = '\0';
     }
-    return resp.data;
+    return result;
 }
 
 /* ── Clipboard + paste ──────────────────────────────────────────────── */

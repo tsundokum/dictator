@@ -1,10 +1,10 @@
 /*
- * test_e2e — end-to-end integration test: mp3 → PCM → chunked WAV → Groq API
+ * test_e2e — end-to-end integration test: mp3 → PCM → chunked WAV → AssemblyAI
  *
  * Converts test.mp3 to raw PCM, runs it through the chunked transcription
  * pipeline, and compares the result against the reference text in test.txt.
  *
- * Requires: ffmpeg, GROQ key in .env, network access, test.mp3, test.txt
+ * Requires: ffmpeg, ASSEMBLYAI key in .env, network access, test.mp3, test.txt
  * Build: make test_e2e
  * Run:   ./test_e2e       (NOT part of `make test` — use `make e2e`)
  */
@@ -173,7 +173,7 @@ int main(void) {
 
     /* Load API key */
     if (load_env() < 0) {
-        fprintf(stderr, "test_e2e: cannot load .env (need GROQ= key)\n");
+        fprintf(stderr, "test_e2e: cannot load .env (need ASSEMBLYAI= key)\n");
         free(ref_text);
         return 1;
     }

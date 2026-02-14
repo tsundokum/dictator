@@ -45,11 +45,11 @@ Config parsing uses `MOD_SHIFT`, `MOD_CTRL`, `MOD_ALT`, `MOD_SUPER` (not X11 mas
 | `cfg` struct + `load_config()` | Parses `/etc/dictator.conf`, sets copy_key/paste_key hotkeys and notify |
 | `parse_hotkey()` | Parses modifier prefixes + key name into a `struct hotkey` (using `MOD_*` flags) |
 | `detect_backend()` | Checks `XDG_SESSION_TYPE` to pick X11 or evdev backend |
-| `load_env()` | Reads `GROQ=` from `.env` |
+| `load_env()` | Reads `ASSEMBLYAI=` from `.env` |
 | `notify()` | Fires `notify-send` (respects `cfg.notify`) |
 | `record_thread()` | ALSA capture into `pcm_buf` |
 | `build_wav()` | Wraps PCM buffer in a WAV header (in-memory) |
-| `transcribe()` | POSTs WAV to Groq Whisper API via libcurl, returns text |
+| `transcribe()` | Uploads WAV to AssemblyAI, submits transcript job, polls for result |
 | `handle_recording_done()` | Shared post-recording logic: build WAV → transcribe → paste |
 | `paste_text()` | Clipboard + paste: `xclip`/`xdotool` on X11, `wl-copy`/`ydotool` on Wayland |
 | `run_x11()` | X11 backend: hotkey grab, X11 event loop |
