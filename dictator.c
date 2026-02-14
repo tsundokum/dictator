@@ -841,6 +841,18 @@ static int run_x11(void) {
     Window root = DefaultRootWindow(dpy);
     KeyCode copy_kc  = XKeysymToKeycode(dpy, copy_ks);
     KeyCode paste_kc = XKeysymToKeycode(dpy, paste_ks);
+    if (!copy_kc) {
+        fprintf(stderr, "dictator: copy_key '%s' has no keycode in X11 keymap\n",
+                cfg.copy_key.key_name);
+        XCloseDisplay(dpy);
+        return 1;
+    }
+    if (!paste_kc) {
+        fprintf(stderr, "dictator: paste_key '%s' has no keycode in X11 keymap\n",
+                cfg.paste_key.key_name);
+        XCloseDisplay(dpy);
+        return 1;
+    }
 
     unsigned copy_xmod  = mod_to_x11(cfg.copy_key.mod_mask);
     unsigned paste_xmod = mod_to_x11(cfg.paste_key.mod_mask);
@@ -931,6 +943,9 @@ static const struct {
     {"F1",  KEY_F1},  {"F2",  KEY_F2},  {"F3",  KEY_F3},  {"F4",  KEY_F4},
     {"F5",  KEY_F5},  {"F6",  KEY_F6},  {"F7",  KEY_F7},  {"F8",  KEY_F8},
     {"F9",  KEY_F9},  {"F10", KEY_F10}, {"F11", KEY_F11}, {"F12", KEY_F12},
+    {"F13", KEY_F13}, {"F14", KEY_F14}, {"F15", KEY_F15}, {"F16", KEY_F16},
+    {"F17", KEY_F17}, {"F18", KEY_F18}, {"F19", KEY_F19}, {"F20", KEY_F20},
+    {"F21", KEY_F21}, {"F22", KEY_F22}, {"F23", KEY_F23}, {"F24", KEY_F24},
     {"space", KEY_SPACE}, {"Space", KEY_SPACE},
     {"Return", KEY_ENTER}, {"return", KEY_ENTER},
     {"Tab", KEY_TAB}, {"tab", KEY_TAB},
