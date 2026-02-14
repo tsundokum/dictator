@@ -396,22 +396,26 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
 /* ── Clipboard + paste ──────────────────────────────────────────────── */
 
 static void paste_text(const char *text, int autopaste) {
-    /* Copy to clipboard — backend-dependent */
-    const char *clip_cmd = (active_backend == BACKEND_EVDEV)
-        ? "wl-copy" : "xclip -selection clipboard";
-    FILE *p = popen(clip_cmd, "w");
-    if (p) {
-        fwrite(text, 1, strlen(text), p);
-        pclose(p);
+    /* Copy to both clipboard and primary selection */
+    if (active_backend == BACKEND_EVDEV) {
+        FILE *p = popen("wl-copy", "w");
+        if (p) { fwrite(text, 1, strlen(text), p); pclose(p); }
+        p = popen("wl-copy --primary", "w");
+        if (p) { fwrite(text, 1, strlen(text), p); pclose(p); }
+    } else {
+        FILE *p = popen("xclip -selection clipboard", "w");
+        if (p) { fwrite(text, 1, strlen(text), p); pclose(p); }
+        p = popen("xclip -selection primary", "w");
+        if (p) { fwrite(text, 1, strlen(text), p); pclose(p); }
     }
     if (!autopaste) return;
     /* Small delay to ensure clipboard is set */
     usleep(50000);
-    /* Simulate Ctrl+V — backend-dependent */
+    /* Simulate Shift+Insert — works in both GUI apps and terminals */
     if (active_backend == BACKEND_EVDEV) {
-        if (run("ydotool key 29:1 47:1 47:0 29:0")) { /* best effort */ }
+        if (run("ydotool key 42:1 110:1 110:0 42:0")) { /* best effort */ }
     } else {
-        if (run("xdotool key --clearmodifiers ctrl+v")) { /* best effort */ }
+        if (run("xdotool key --clearmodifiers shift+Insert")) { /* best effort */ }
     }
 }
 
@@ -556,44 +560,51 @@ static int run_x11(void) {
     int active_autopaste = 0;
     KeyCode active_kc = 0;
 
+    int xfd = ConnectionNumber(dpy);
+    XFlush(dpy); /* flush grab requests before entering poll loop */
     while (!quit) {
-        XEvent ev;
-        XNextEvent(dpy, &ev);
-        if (quit) break;
+        /* Poll X fd with timeout so we can check quit flag */
+        struct pollfd xpfd = { .fd = xfd, .events = POLLIN };
+        int pr = poll(&xpfd, 1, 200);
+        if (pr <= 0) continue;
+        while (XEventsQueued(dpy, QueuedAfterReading) > 0 && !quit) {
+            XEvent ev;
+            XNextEvent(dpy, &ev);
 
-        if (ev.type == KeyPress && !is_recording) {
-            /* Strip lock-key bits to match our configured modifiers */
-            unsigned clean = ev.xkey.state & ~(Mod2Mask | LockMask);
+            if (ev.type == KeyPress && !is_recording) {
+                /* Strip lock-key bits to match our configured modifiers */
+                unsigned clean = ev.xkey.state & ~(Mod2Mask | LockMask);
 
-            if (ev.xkey.keycode == paste_kc &&
-                clean == paste_xmod) {
-                active_autopaste = 1;
-                active_kc = paste_kc;
-            } else if (ev.xkey.keycode == copy_kc &&
-                       clean == copy_xmod) {
-                active_autopaste = 0;
-                active_kc = copy_kc;
-            } else {
-                continue;
+                if (ev.xkey.keycode == paste_kc &&
+                    clean == paste_xmod) {
+                    active_autopaste = 1;
+                    active_kc = paste_kc;
+                } else if (ev.xkey.keycode == copy_kc &&
+                           clean == copy_xmod) {
+                    active_autopaste = 0;
+                    active_kc = copy_kc;
+                } else {
+                    continue;
+                }
+
+                is_recording = 1;
+                recording = 1;
+                notify("Recording...");
+                if (pthread_create(&tid, NULL, record_thread, NULL) != 0) {
+                    perror("dictator: pthread_create");
+                    notify("Failed to start recording");
+                    is_recording = 0;
+                    recording = 0;
+                    continue;
+                }
             }
-
-            is_recording = 1;
-            recording = 1;
-            notify("Recording...");
-            if (pthread_create(&tid, NULL, record_thread, NULL) != 0) {
-                perror("dictator: pthread_create");
-                notify("Failed to start recording");
-                is_recording = 0;
+            else if (ev.type == KeyRelease && is_recording &&
+                     ev.xkey.keycode == active_kc) {
                 recording = 0;
-                continue;
+                pthread_join(tid, NULL);
+                is_recording = 0;
+                handle_recording_done(active_autopaste);
             }
-        }
-        else if (ev.type == KeyRelease && is_recording &&
-                 ev.xkey.keycode == active_kc) {
-            recording = 0;
-            pthread_join(tid, NULL);
-            is_recording = 0;
-            handle_recording_done(active_autopaste);
         }
     }
 
