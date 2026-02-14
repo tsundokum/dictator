@@ -1,3 +1,5 @@
 dictator
 test_config
+test_audio
+test_e2e
 .env
