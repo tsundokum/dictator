@@ -186,11 +186,6 @@ static int load_env(void) {
             val[strcspn(val, "\r\n")] = '\0';
             snprintf(groq_key, sizeof(groq_key), "Authorization: Bearer %s", val);
             have_groq = 1;
-        } else if (strncmp(line, "GROQ_MODEL=", 11) == 0) {
-            char *val = line + 11;
-            val[strcspn(val, "\r\n")] = '\0';
-            strncpy(cfg.groq_model, val, sizeof(cfg.groq_model) - 1);
-            cfg.groq_model[sizeof(cfg.groq_model) - 1] = '\0';
         } else if (strncmp(line, "ASSEMBLYAI=", 11) == 0) {
             char *val = line + 11;
             val[strcspn(val, "\r\n")] = '\0';

@@ -32,7 +32,6 @@ make
 Create `.env` with your [Groq API key](https://console.groq.com/keys) and/or [AssemblyAI API key](https://www.assemblyai.com/):
 ```
 GROQ=gsk_...
-GROQ_MODEL=whisper-large-v3
 ASSEMBLYAI=...
 ```
 
@@ -87,7 +86,6 @@ notify = true
 | `notify` | Desktop notifications | `true` / `false` | `true` |
 | `groq_model` | Groq Whisper model name | string | `whisper-large-v3` |
 
-`groq_model` can also be set via `GROQ_MODEL=` in `.env` (the `.env` value takes precedence).
 
 - **KeyName** on X11: any keysym name recognized by `XStringToKeysym()` (e.g. `F1`, `F5`, `space`, `a`). Case-sensitive.
 - **KeyName** on Wayland: looked up from a built-in table (`F1`–`F12`, `a`–`z`, `0`–`9`, `space`, `Return`, `Tab`, etc.). Case-insensitive.
