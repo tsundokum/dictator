@@ -29,10 +29,14 @@ sudo usermod -aG input $USER   # log out and back in
 make
 ```
 
-Create `.env` with your [Groq API key](https://console.groq.com/keys):
+Create `.env` with your [Groq API key](https://console.groq.com/keys) and/or [AssemblyAI API key](https://www.assemblyai.com/):
 ```
 GROQ=gsk_...
+GROQ_MODEL=whisper-large-v3
+ASSEMBLYAI=...
 ```
+
+Groq is the primary transcription backend. If both keys are present, AssemblyAI is used as a fallback when Groq fails. At least one key is required.
 
 Install and enable the systemd service:
 ```bash
@@ -61,7 +65,7 @@ The backend is detected automatically at startup via `XDG_SESSION_TYPE`:
 - **X11** — uses `XGrabKey` for global hotkeys, `xclip` for clipboard, `xdotool` for paste simulation
 - **Wayland** — uses evdev (`/dev/input/event*`) for global hotkeys, `wl-copy` for clipboard, `ydotool` for paste simulation
 
-ALSA recording and the Groq Whisper API transcription work identically on both.
+ALSA recording and transcription (Groq primary, AssemblyAI fallback) work identically on both.
 
 ## Configuration
 
@@ -81,6 +85,9 @@ notify = true
 | `copy_key` | Hotkey: transcribe + clipboard only | `[shift+][ctrl+][alt+][super+]KeyName` | `F1` |
 | `paste_key` | Hotkey: transcribe + clipboard + Ctrl+V | `[shift+][ctrl+][alt+][super+]KeyName` | `shift+F1` |
 | `notify` | Desktop notifications | `true` / `false` | `true` |
+| `groq_model` | Groq Whisper model name | string | `whisper-large-v3` |
+
+`groq_model` can also be set via `GROQ_MODEL=` in `.env` (the `.env` value takes precedence).
 
 - **KeyName** on X11: any keysym name recognized by `XStringToKeysym()` (e.g. `F1`, `F5`, `space`, `a`). Case-sensitive.
 - **KeyName** on Wayland: looked up from a built-in table (`F1`–`F12`, `a`–`z`, `0`–`9`, `space`, `Return`, `Tab`, etc.). Case-insensitive.

@@ -20,7 +20,7 @@ Compile-time flags: `-DUSE_X11 -DUSE_EVDEV` (both enabled by default in Makefile
 
 Single C file (`dictator.c`), two threads, two backends (X11 and evdev/Wayland). Tests in `test_config.c` which `#include`s `dictator.c` directly (with `#define main dictator_main` to avoid symbol collision) so it can access the static `cfg` struct and `load_config_file()`.
 
-Key statics: `pcm_buf` (recording buffer), `cfg` (config struct with copy_key/paste_key hotkey sub-structs and notify flag), `api_key` (loaded from .env), `active_backend` (detected at runtime).
+Key statics: `pcm_buf` (recording buffer), `cfg` (config struct with copy_key/paste_key hotkey sub-structs and notify flag), `groq_key`/`aai_key` (loaded from .env), `active_backend` (detected at runtime).
 
 ### Backend detection
 
@@ -45,11 +45,13 @@ Config parsing uses `MOD_SHIFT`, `MOD_CTRL`, `MOD_ALT`, `MOD_SUPER` (not X11 mas
 | `cfg` struct + `load_config()` | Parses `/etc/dictator.conf`, sets copy_key/paste_key hotkeys and notify |
 | `parse_hotkey()` | Parses modifier prefixes + key name into a `struct hotkey` (using `MOD_*` flags) |
 | `detect_backend()` | Checks `XDG_SESSION_TYPE` to pick X11 or evdev backend |
-| `load_env()` | Reads `ASSEMBLYAI=` from `.env` |
+| `load_env()` | Reads `GROQ=` and `ASSEMBLYAI=` from `.env` |
 | `notify()` | Fires `notify-send` (respects `cfg.notify`) |
 | `record_thread()` | ALSA capture into `pcm_buf` |
 | `build_wav()` | Wraps PCM buffer in a WAV header (in-memory) |
-| `transcribe()` | Uploads WAV to AssemblyAI, submits transcript job, polls for result |
+| `transcribe()` | Tries Groq first, falls back to AssemblyAI |
+| `transcribe_groq()` | Single-POST Groq Whisper API (plain text response) |
+| `transcribe_aai()` | Uploads WAV to AssemblyAI, submits transcript job, polls for result |
 | `handle_recording_done()` | Shared post-recording logic: build WAV → transcribe → paste |
 | `paste_text()` | Clipboard + paste: `xclip`/`xdotool` on X11, `wl-copy`/`ydotool` on Wayland |
 | `run_x11()` | X11 backend: hotkey grab, X11 event loop |

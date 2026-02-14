@@ -32,6 +32,7 @@ static void reset_cfg(void) {
     cfg.paste_key.mod_mask = MOD_SHIFT;
     cfg.notify = 1;
     cfg.max_duration = MAX_SECONDS;
+    snprintf(cfg.groq_model, sizeof(cfg.groq_model), "whisper-large-v3");
 }
 
 /* Write content to a temp file, load it, then remove */
@@ -244,6 +245,20 @@ static void test_max_duration_clamped(void) {
     ASSERT(cfg.max_duration == 300, "max_duration clamped to 300 (upper bound)");
 }
 
+static void test_groq_model_default(void) {
+    printf("test_groq_model_default\n");
+    reset_cfg();
+    ASSERT(strcmp(cfg.groq_model, "whisper-large-v3") == 0,
+           "default groq_model is whisper-large-v3");
+}
+
+static void test_groq_model_custom(void) {
+    printf("test_groq_model_custom\n");
+    load_from_string("groq_model = distil-whisper-large-v3-en\n");
+    ASSERT(strcmp(cfg.groq_model, "distil-whisper-large-v3-en") == 0,
+           "groq_model set to custom value");
+}
+
 int main(void) {
     test_defaults();
     test_simple_copy_key();
@@ -269,6 +284,8 @@ int main(void) {
     test_max_duration_default();
     test_max_duration_custom();
     test_max_duration_clamped();
+    test_groq_model_default();
+    test_groq_model_custom();
 
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

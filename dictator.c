@@ -44,7 +44,9 @@ static int16_t  pcm_buf[BUF_SAMPLES];
 static size_t   pcm_pos;           /* samples written */
 static atomic_int recording;       /* flag: 1 = keep recording */
 
-static char api_key[1024];
+static char groq_key[1024];
+static char aai_key[1024];
+static int  have_groq, have_aai;
 
 /* ── Backend-agnostic modifier flags ──────────────────────────────── */
 
@@ -79,15 +81,17 @@ struct hotkey {
 };
 
 static struct {
-    struct hotkey copy_key;   /* transcribe + clipboard only */
-    struct hotkey paste_key;  /* transcribe + clipboard + Ctrl+V */
-    int           notify;     /* 1 = show desktop notifications */
-    int           max_duration; /* recording limit in seconds */
+    struct hotkey copy_key;       /* transcribe + clipboard only */
+    struct hotkey paste_key;      /* transcribe + clipboard + Ctrl+V */
+    int           notify;         /* 1 = show desktop notifications */
+    int           max_duration;   /* recording limit in seconds */
+    char          groq_model[64]; /* Groq Whisper model name */
 } cfg = {
     .copy_key     = { .key_name = "F1", .mod_mask = 0 },
     .paste_key    = { .key_name = "F1", .mod_mask = MOD_SHIFT },
     .notify       = 1,
     .max_duration = MAX_SECONDS,
+    .groq_model   = "whisper-large-v3",
 };
 
 /* ── Config file loader ─────────────────────────────────────────────── */
@@ -152,6 +156,8 @@ static int load_config_file(const char *path) {
             parse_hotkey(val, &cfg.paste_key);
         } else if (strcmp(key, "notify") == 0) {
             cfg.notify = (strcmp(val, "true") == 0);
+        } else if (strcmp(key, "groq_model") == 0) {
+            snprintf(cfg.groq_model, sizeof(cfg.groq_model), "%s", val);
         } else if (strcmp(key, "max_duration") == 0) {
             int v = atoi(val);
             if (v < 10) v = 10;
@@ -175,17 +181,29 @@ static int load_env(void) {
     if (!f) { fprintf(stderr, "dictator: cannot open .env\n"); return -1; }
     char line[256];
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "ASSEMBLYAI=", 11) == 0) {
+        if (strncmp(line, "GROQ=", 5) == 0) {
+            char *val = line + 5;
+            val[strcspn(val, "\r\n")] = '\0';
+            snprintf(groq_key, sizeof(groq_key), "Authorization: Bearer %s", val);
+            have_groq = 1;
+        } else if (strncmp(line, "GROQ_MODEL=", 11) == 0) {
             char *val = line + 11;
             val[strcspn(val, "\r\n")] = '\0';
-            snprintf(api_key, sizeof(api_key), "Authorization: %s", val);
-            fclose(f);
-            return 0;
+            strncpy(cfg.groq_model, val, sizeof(cfg.groq_model) - 1);
+            cfg.groq_model[sizeof(cfg.groq_model) - 1] = '\0';
+        } else if (strncmp(line, "ASSEMBLYAI=", 11) == 0) {
+            char *val = line + 11;
+            val[strcspn(val, "\r\n")] = '\0';
+            snprintf(aai_key, sizeof(aai_key), "Authorization: %s", val);
+            have_aai = 1;
         }
     }
     fclose(f);
-    fprintf(stderr, "dictator: ASSEMBLYAI= not found in .env\n");
-    return -1;
+    if (!have_groq && !have_aai) {
+        fprintf(stderr, "dictator: need GROQ= or ASSEMBLYAI= in .env\n");
+        return -1;
+    }
+    return 0;
 }
 
 /* ── Notify helper ──────────────────────────────────────────────────── */
@@ -439,11 +457,11 @@ static char *json_get_string(const char *json, const char *key) {
     return json_unescape(val);
 }
 
-/* ── AssemblyAI transcription API ──────────────────────────────────── */
+/* ── Shared curl helper ─────────────────────────────────────────────── */
 
-/* Shared curl helper: perform request, check for errors, return response.
+/* Perform request, check for errors, return response.
  * Caller must free resp->data. Returns 0 on success, -1 on failure. */
-static int aai_request(CURL *curl, struct curl_slist *headers,
+static int api_request(CURL *curl, struct curl_slist *headers,
                        struct response *resp, const char *label) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -472,9 +490,64 @@ static int aai_request(CURL *curl, struct curl_slist *headers,
     return 0;
 }
 
-static char *transcribe(uint8_t *wav, size_t wav_len) {
+/* ── Groq Whisper API ──────────────────────────────────────────────── */
+
+static char *transcribe_groq(uint8_t *wav, size_t wav_len) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+
     struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, api_key);
+    headers = curl_slist_append(headers, groq_key);
+
+    curl_mime *mime = curl_mime_init(curl);
+
+    curl_mimepart *part = curl_mime_addpart(mime);
+    curl_mime_name(part, "file");
+    curl_mime_data(part, (char *)wav, wav_len);
+    curl_mime_filename(part, "audio.wav");
+    curl_mime_type(part, "audio/wav");
+
+    part = curl_mime_addpart(mime);
+    curl_mime_name(part, "model");
+    curl_mime_data(part, cfg.groq_model, CURL_ZERO_TERMINATED);
+
+    part = curl_mime_addpart(mime);
+    curl_mime_name(part, "response_format");
+    curl_mime_data(part, "text", CURL_ZERO_TERMINATED);
+
+    struct response resp = {0};
+
+    curl_easy_setopt(curl, CURLOPT_URL,
+                     "https://api.groq.com/openai/v1/audio/transcriptions");
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+
+    if (api_request(curl, headers, &resp, "groq") < 0) {
+        curl_mime_free(mime);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        free(resp.data);
+        return NULL;
+    }
+
+    curl_mime_free(mime);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    /* Trim trailing whitespace */
+    if (resp.data) {
+        size_t len = strlen(resp.data);
+        while (len > 0 && (resp.data[len-1] == '\n' || resp.data[len-1] == '\r'
+                           || resp.data[len-1] == ' '))
+            resp.data[--len] = '\0';
+    }
+    return resp.data;
+}
+
+/* ── AssemblyAI transcription API ──────────────────────────────────── */
+
+static char *transcribe_aai(uint8_t *wav, size_t wav_len) {
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, aai_key);
 
     /* ── Step 1: Upload audio ─────────────────────────────────────── */
     CURL *curl = curl_easy_init();
@@ -487,7 +560,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)wav_len);
 
     struct response resp = {0};
-    if (aai_request(curl, headers, &resp, "upload") < 0) {
+    if (api_request(curl, headers, &resp, "aai-upload") < 0) {
         free(resp.data);
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
@@ -511,7 +584,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     /* Replace Content-Type for JSON body */
     curl_slist_free_all(headers);
     headers = NULL;
-    headers = curl_slist_append(headers, api_key);
+    headers = curl_slist_append(headers, aai_key);
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
     char body[1024];
@@ -524,7 +597,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
 
     resp = (struct response){0};
-    if (aai_request(curl, headers, &resp, "submit") < 0) {
+    if (api_request(curl, headers, &resp, "aai-submit") < 0) {
         free(resp.data);
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
@@ -550,7 +623,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     /* Switch headers back (no Content-Type needed for GET) */
     curl_slist_free_all(headers);
     headers = NULL;
-    headers = curl_slist_append(headers, api_key);
+    headers = curl_slist_append(headers, aai_key);
 
     char *result = NULL;
     for (int attempt = 0; attempt < 120; attempt++) {
@@ -563,7 +636,7 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
 
         resp = (struct response){0};
-        if (aai_request(curl, headers, &resp, "poll") < 0) {
+        if (api_request(curl, headers, &resp, "aai-poll") < 0) {
             free(resp.data);
             curl_easy_cleanup(curl);
             break;
@@ -607,6 +680,21 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
             result[--len] = '\0';
     }
     return result;
+}
+
+/* ── Transcription with fallback ───────────────────────────────────── */
+
+static char *transcribe(uint8_t *wav, size_t wav_len) {
+    if (have_groq) {
+        char *result = transcribe_groq(wav, wav_len);
+        if (result) return result;
+        fprintf(stderr, "dictator: Groq failed\n");
+        if (have_aai)
+            notify("Groq failed, trying AssemblyAI...");
+    }
+    if (have_aai)
+        return transcribe_aai(wav, wav_len);
+    return NULL;
 }
 
 /* ── Clipboard + paste ──────────────────────────────────────────────── */

@@ -173,7 +173,7 @@ int main(void) {
 
     /* Load API key */
     if (load_env() < 0) {
-        fprintf(stderr, "test_e2e: cannot load .env (need ASSEMBLYAI= key)\n");
+        fprintf(stderr, "test_e2e: cannot load .env (need GROQ= or ASSEMBLYAI= key)\n");
         free(ref_text);
         return 1;
     }
