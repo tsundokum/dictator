@@ -26,10 +26,12 @@ static int tests_run, tests_failed;
 
 /* Reset cfg to defaults before each test */
 static void reset_cfg(void) {
-    snprintf(cfg.copy_key.key_name, sizeof(cfg.copy_key.key_name), "F1");
-    cfg.copy_key.mod_mask = 0;
-    snprintf(cfg.paste_key.key_name, sizeof(cfg.paste_key.key_name), "F1");
-    cfg.paste_key.mod_mask = MOD_SHIFT;
+    snprintf(cfg.speech2text_key.key_name, sizeof(cfg.speech2text_key.key_name), "F1");
+    cfg.speech2text_key.mod_mask = 0;
+    snprintf(cfg.speech2text_paste_key.key_name, sizeof(cfg.speech2text_paste_key.key_name), "F1");
+    cfg.speech2text_paste_key.mod_mask = MOD_SHIFT;
+    snprintf(cfg.speech2text_translate_paste_key.key_name, sizeof(cfg.speech2text_translate_paste_key.key_name), "F1");
+    cfg.speech2text_translate_paste_key.mod_mask = MOD_CTRL;
     cfg.notify = 1;
     cfg.max_duration = MAX_SECONDS;
     snprintf(cfg.groq_model, sizeof(cfg.groq_model), "whisper-large-v3");
@@ -54,88 +56,90 @@ static void test_defaults(void) {
     reset_cfg();
     int rc = load_config_file("/tmp/nonexistent_dictator.conf");
     ASSERT(rc == -1, "missing file returns -1");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "default copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == 0, "default copy_key mod_mask is 0");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "default paste_key is F1");
-    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "default paste_key mod_mask is MOD_SHIFT");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "default speech2text_key is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == 0, "default speech2text_key mod_mask is 0");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F1") == 0, "default speech2text_paste_key is F1");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == MOD_SHIFT, "default speech2text_paste_key mod_mask is MOD_SHIFT");
+    ASSERT(strcmp(cfg.speech2text_translate_paste_key.key_name, "F1") == 0, "default speech2text_translate_paste_key is F1");
+    ASSERT(cfg.speech2text_translate_paste_key.mod_mask == MOD_CTRL, "default speech2text_translate_paste_key mod_mask is MOD_CTRL");
     ASSERT(cfg.notify == 1, "default notify is 1");
 }
 
-static void test_simple_copy_key(void) {
-    printf("test_simple_copy_key\n");
-    load_from_string("copy_key = F5\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F5") == 0, "copy_key is F5");
-    ASSERT(cfg.copy_key.mod_mask == 0, "no modifiers");
+static void test_simple_speech2text_key(void) {
+    printf("test_simple_speech2text_key\n");
+    load_from_string("speech2text_key = F5\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F5") == 0, "speech2text_key is F5");
+    ASSERT(cfg.speech2text_key.mod_mask == 0, "no modifiers");
 }
 
-static void test_shift_copy_key(void) {
-    printf("test_shift_copy_key\n");
-    load_from_string("copy_key = shift+F1\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key name is F1");
-    ASSERT(cfg.copy_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
+static void test_shift_speech2text_key(void) {
+    printf("test_shift_speech2text_key\n");
+    load_from_string("speech2text_key = shift+F1\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "speech2text_key name is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
 }
 
-static void test_ctrl_copy_key(void) {
-    printf("test_ctrl_copy_key\n");
-    load_from_string("copy_key = ctrl+space\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "space") == 0, "copy_key is space");
-    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "mod_mask is MOD_CTRL");
+static void test_ctrl_speech2text_key(void) {
+    printf("test_ctrl_speech2text_key\n");
+    load_from_string("speech2text_key = ctrl+space\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "space") == 0, "speech2text_key is space");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_CTRL, "mod_mask is MOD_CTRL");
 }
 
 static void test_control_alias(void) {
     printf("test_control_alias\n");
-    load_from_string("copy_key = control+F1\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "control+ maps to MOD_CTRL");
+    load_from_string("speech2text_key = control+F1\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "speech2text_key is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_CTRL, "control+ maps to MOD_CTRL");
 }
 
-static void test_alt_copy_key(void) {
-    printf("test_alt_copy_key\n");
-    load_from_string("copy_key = alt+a\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "a") == 0, "copy_key is a");
-    ASSERT(cfg.copy_key.mod_mask == MOD_ALT, "mod_mask is MOD_ALT");
+static void test_alt_speech2text_key(void) {
+    printf("test_alt_speech2text_key\n");
+    load_from_string("speech2text_key = alt+a\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "a") == 0, "speech2text_key is a");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_ALT, "mod_mask is MOD_ALT");
 }
 
-static void test_super_copy_key(void) {
-    printf("test_super_copy_key\n");
-    load_from_string("copy_key = super+F1\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == MOD_SUPER, "mod_mask is MOD_SUPER");
+static void test_super_speech2text_key(void) {
+    printf("test_super_speech2text_key\n");
+    load_from_string("speech2text_key = super+F1\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "speech2text_key is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_SUPER, "mod_mask is MOD_SUPER");
 }
 
 static void test_multiple_modifiers(void) {
     printf("test_multiple_modifiers\n");
-    load_from_string("copy_key = ctrl+shift+F2\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F2") == 0, "copy_key is F2");
-    ASSERT(cfg.copy_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "ctrl+shift");
+    load_from_string("speech2text_key = ctrl+shift+F2\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F2") == 0, "speech2text_key is F2");
+    ASSERT(cfg.speech2text_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "ctrl+shift");
 }
 
 static void test_case_insensitive_modifiers(void) {
     printf("test_case_insensitive_modifiers\n");
-    load_from_string("copy_key = SHIFT+CTRL+F3\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F3") == 0, "copy_key is F3");
-    ASSERT(cfg.copy_key.mod_mask == (MOD_SHIFT | MOD_CTRL), "SHIFT+CTRL parsed");
+    load_from_string("speech2text_key = SHIFT+CTRL+F3\n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F3") == 0, "speech2text_key is F3");
+    ASSERT(cfg.speech2text_key.mod_mask == (MOD_SHIFT | MOD_CTRL), "SHIFT+CTRL parsed");
 }
 
-static void test_simple_paste_key(void) {
-    printf("test_simple_paste_key\n");
-    load_from_string("paste_key = F6\n");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F6") == 0, "paste_key is F6");
-    ASSERT(cfg.paste_key.mod_mask == 0, "no modifiers");
+static void test_simple_speech2text_paste_key(void) {
+    printf("test_simple_speech2text_paste_key\n");
+    load_from_string("speech2text_paste_key = F6\n");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F6") == 0, "speech2text_paste_key is F6");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == 0, "no modifiers");
 }
 
-static void test_shift_paste_key(void) {
-    printf("test_shift_paste_key\n");
-    load_from_string("paste_key = shift+F2\n");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F2") == 0, "paste_key name is F2");
-    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
+static void test_shift_speech2text_paste_key(void) {
+    printf("test_shift_speech2text_paste_key\n");
+    load_from_string("speech2text_paste_key = shift+F2\n");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F2") == 0, "speech2text_paste_key name is F2");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == MOD_SHIFT, "mod_mask is MOD_SHIFT");
 }
 
-static void test_paste_key_multiple_modifiers(void) {
-    printf("test_paste_key_multiple_modifiers\n");
-    load_from_string("paste_key = ctrl+alt+F4\n");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F4") == 0, "paste_key is F4");
-    ASSERT(cfg.paste_key.mod_mask == (MOD_CTRL | MOD_ALT), "ctrl+alt");
+static void test_speech2text_paste_key_multiple_modifiers(void) {
+    printf("test_speech2text_paste_key_multiple_modifiers\n");
+    load_from_string("speech2text_paste_key = ctrl+alt+F4\n");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F4") == 0, "speech2text_paste_key is F4");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == (MOD_CTRL | MOD_ALT), "ctrl+alt");
 }
 
 static void test_notify_false(void) {
@@ -156,42 +160,42 @@ static void test_comments_and_blanks(void) {
         "# this is a comment\n"
         "\n"
         "  # indented comment\n"
-        "copy_key = F7\n"
+        "speech2text_key = F7\n"
     );
-    ASSERT(strcmp(cfg.copy_key.key_name, "F7") == 0, "key parsed after comments");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F7") == 0, "key parsed after comments");
 }
 
 static void test_whitespace_handling(void) {
     printf("test_whitespace_handling\n");
-    load_from_string("  copy_key   =   shift+F9  \n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F9") == 0, "copy_key with whitespace");
-    ASSERT(cfg.copy_key.mod_mask == MOD_SHIFT, "modifier with whitespace");
+    load_from_string("  speech2text_key   =   shift+F9  \n");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F9") == 0, "speech2text_key with whitespace");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_SHIFT, "modifier with whitespace");
 }
 
 static void test_all_options(void) {
     printf("test_all_options\n");
     load_from_string(
-        "copy_key = alt+F4\n"
-        "paste_key = super+F4\n"
+        "speech2text_key = alt+F4\n"
+        "speech2text_paste_key = super+F4\n"
         "notify = false\n"
     );
-    ASSERT(strcmp(cfg.copy_key.key_name, "F4") == 0, "copy_key is F4");
-    ASSERT(cfg.copy_key.mod_mask == MOD_ALT, "copy_key alt modifier");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F4") == 0, "paste_key is F4");
-    ASSERT(cfg.paste_key.mod_mask == MOD_SUPER, "paste_key super modifier");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F4") == 0, "speech2text_key is F4");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_ALT, "speech2text_key alt modifier");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F4") == 0, "speech2text_paste_key is F4");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == MOD_SUPER, "speech2text_paste_key super modifier");
     ASSERT(cfg.notify == 0, "notify off");
 }
 
 static void test_both_keys_with_modifiers(void) {
     printf("test_both_keys_with_modifiers\n");
     load_from_string(
-        "copy_key = ctrl+F1\n"
-        "paste_key = ctrl+shift+F1\n"
+        "speech2text_key = ctrl+F1\n"
+        "speech2text_paste_key = ctrl+shift+F1\n"
     );
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "copy_key is F1");
-    ASSERT(cfg.copy_key.mod_mask == MOD_CTRL, "copy_key ctrl");
-    ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "paste_key is F1");
-    ASSERT(cfg.paste_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "paste_key ctrl+shift");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "speech2text_key is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == MOD_CTRL, "speech2text_key ctrl");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F1") == 0, "speech2text_paste_key is F1");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "speech2text_paste_key ctrl+shift");
 }
 
 static void test_old_config_ignored(void) {
@@ -199,28 +203,28 @@ static void test_old_config_ignored(void) {
     load_from_string(
         "key = F5\n"
         "autopaste = false\n"
-        "copy_key = F3\n"
+        "speech2text_key = F3\n"
     );
-    /* old "key" and "autopaste" silently ignored; copy_key still works */
-    ASSERT(strcmp(cfg.copy_key.key_name, "F3") == 0, "copy_key parsed despite old entries");
-    /* paste_key unchanged from defaults */
-    ASSERT(strcmp(cfg.paste_key.key_name, "F1") == 0, "paste_key stays default");
-    ASSERT(cfg.paste_key.mod_mask == MOD_SHIFT, "paste_key mod stays default");
+    /* old "key" and "autopaste" silently ignored; speech2text_key still works */
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F3") == 0, "speech2text_key parsed despite old entries");
+    /* speech2text_paste_key unchanged from defaults */
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F1") == 0, "speech2text_paste_key stays default");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == MOD_SHIFT, "speech2text_paste_key mod stays default");
 }
 
 static void test_unknown_keys_ignored(void) {
     printf("test_unknown_keys_ignored\n");
     load_from_string(
         "foo = bar\n"
-        "copy_key = F1\n"
+        "speech2text_key = F1\n"
     );
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "known key still parsed");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "known key still parsed");
 }
 
 static void test_no_equals_ignored(void) {
     printf("test_no_equals_ignored\n");
     load_from_string("this line has no equals sign\n");
-    ASSERT(strcmp(cfg.copy_key.key_name, "F1") == 0, "defaults preserved");
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "defaults preserved");
 }
 
 static void test_max_duration_default(void) {
@@ -273,19 +277,48 @@ static void test_proxy_custom(void) {
            "proxy set to custom value");
 }
 
+static void test_simple_speech2text_translate_paste_key(void) {
+    printf("test_simple_speech2text_translate_paste_key\n");
+    load_from_string("speech2text_translate_paste_key = F5\n");
+    ASSERT(strcmp(cfg.speech2text_translate_paste_key.key_name, "F5") == 0, "speech2text_translate_paste_key is F5");
+    ASSERT(cfg.speech2text_translate_paste_key.mod_mask == 0, "no modifiers");
+}
+
+static void test_speech2text_translate_paste_key_with_modifiers(void) {
+    printf("test_speech2text_translate_paste_key_with_modifiers\n");
+    load_from_string("speech2text_translate_paste_key = ctrl+shift+F2\n");
+    ASSERT(strcmp(cfg.speech2text_translate_paste_key.key_name, "F2") == 0, "speech2text_translate_paste_key is F2");
+    ASSERT(cfg.speech2text_translate_paste_key.mod_mask == (MOD_CTRL | MOD_SHIFT), "ctrl+shift");
+}
+
+static void test_all_three_keys(void) {
+    printf("test_all_three_keys\n");
+    load_from_string(
+        "speech2text_key = F1\n"
+        "speech2text_paste_key = shift+F1\n"
+        "speech2text_translate_paste_key = ctrl+F1\n"
+    );
+    ASSERT(strcmp(cfg.speech2text_key.key_name, "F1") == 0, "speech2text_key is F1");
+    ASSERT(cfg.speech2text_key.mod_mask == 0, "speech2text_key no mods");
+    ASSERT(strcmp(cfg.speech2text_paste_key.key_name, "F1") == 0, "speech2text_paste_key is F1");
+    ASSERT(cfg.speech2text_paste_key.mod_mask == MOD_SHIFT, "speech2text_paste_key shift");
+    ASSERT(strcmp(cfg.speech2text_translate_paste_key.key_name, "F1") == 0, "speech2text_translate_paste_key is F1");
+    ASSERT(cfg.speech2text_translate_paste_key.mod_mask == MOD_CTRL, "speech2text_translate_paste_key ctrl");
+}
+
 int main(void) {
     test_defaults();
-    test_simple_copy_key();
-    test_shift_copy_key();
-    test_ctrl_copy_key();
+    test_simple_speech2text_key();
+    test_shift_speech2text_key();
+    test_ctrl_speech2text_key();
     test_control_alias();
-    test_alt_copy_key();
-    test_super_copy_key();
+    test_alt_speech2text_key();
+    test_super_speech2text_key();
     test_multiple_modifiers();
     test_case_insensitive_modifiers();
-    test_simple_paste_key();
-    test_shift_paste_key();
-    test_paste_key_multiple_modifiers();
+    test_simple_speech2text_paste_key();
+    test_shift_speech2text_paste_key();
+    test_speech2text_paste_key_multiple_modifiers();
     test_notify_false();
     test_notify_true();
     test_comments_and_blanks();
@@ -302,6 +335,9 @@ int main(void) {
     test_groq_model_custom();
     test_proxy_default();
     test_proxy_custom();
+    test_simple_speech2text_translate_paste_key();
+    test_speech2text_translate_paste_key_with_modifiers();
+    test_all_three_keys();
 
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

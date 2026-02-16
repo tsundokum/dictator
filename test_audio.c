@@ -24,6 +24,7 @@
 /* ── Mock tracking state ─────────────────────────────────────────────── */
 
 static int    mock_transcribe_calls;
+static int    mock_translate_calls;
 static int    mock_paste_calls;
 static char   mock_paste_buf[16384];
 static int    mock_paste_autopaste;
@@ -58,6 +59,19 @@ static char *test_transcribe(uint8_t *wav, size_t wav_len) {
     return result;
 }
 
+static char *test_translate(uint8_t *wav, size_t wav_len) {
+    mock_translate_calls++;
+
+    /* Validate WAV header */
+    if (wav_len < 44) return NULL;
+    if (memcmp(wav, "RIFF", 4) != 0) return NULL;
+
+    char *result = malloc(32);
+    if (!result) return NULL;
+    snprintf(result, 32, "translated%d", mock_translate_calls);
+    return result;
+}
+
 static void test_paste_text(const char *text, int autopaste) {
     mock_paste_calls++;
     snprintf(mock_paste_buf, sizeof(mock_paste_buf), "%s", text);
@@ -68,7 +82,7 @@ static void test_paste_text(const char *text, int autopaste) {
  * Reimplementation of handle_recording_done() chunking logic using mocks.
  * This mirrors the real function but calls test_transcribe/test_paste_text.
  */
-static void mock_handle_recording_done(int autopaste) {
+static void mock_handle_recording_done(enum action act) {
     if (pcm_pos == 0) return;
 
     size_t nchunks = (pcm_pos + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES;
@@ -84,7 +98,8 @@ static void mock_handle_recording_done(int autopaste) {
         size_t wav_len = build_wav(pcm_buf + offset, chunk_samples, &wav);
         if (!wav_len) return;
 
-        char *text = test_transcribe(wav, wav_len);
+        char *text = (act == ACT_TRANSLATE) ? test_translate(wav, wav_len)
+                                            : test_transcribe(wav, wav_len);
         free(wav);
 
         if (text && strlen(text) > 0) {
@@ -102,7 +117,7 @@ static void mock_handle_recording_done(int autopaste) {
     }
 
     if (result_len > 0) {
-        test_paste_text(result, autopaste);
+        test_paste_text(result, act != ACT_COPY);
     }
 }
 
@@ -120,6 +135,7 @@ static int tests_run, tests_failed;
 
 static void reset_mocks(void) {
     mock_transcribe_calls = 0;
+    mock_translate_calls = 0;
     mock_paste_calls = 0;
     mock_paste_buf[0] = '\0';
     mock_paste_autopaste = -1;
@@ -211,7 +227,7 @@ static void test_chunk_short_recording(void) {
     reset_mocks();
 
     pcm_pos = SAMPLE_RATE * 10; /* 10 seconds */
-    mock_handle_recording_done(0);
+    mock_handle_recording_done(ACT_COPY);
 
     ASSERT(mock_transcribe_calls == 1, "short recording: 1 transcribe call");
     ASSERT(mock_paste_calls == 1, "short recording: 1 paste call");
@@ -224,7 +240,7 @@ static void test_chunk_exactly_30s(void) {
     reset_mocks();
 
     pcm_pos = CHUNK_SAMPLES; /* exactly 30s */
-    mock_handle_recording_done(1);
+    mock_handle_recording_done(ACT_PASTE);
 
     ASSERT(mock_transcribe_calls == 1, "30s: 1 transcribe call");
     ASSERT(mock_paste_calls == 1, "30s: 1 paste call");
@@ -237,7 +253,7 @@ static void test_chunk_45s(void) {
     reset_mocks();
 
     pcm_pos = SAMPLE_RATE * 45; /* 2 chunks: 30s + 15s */
-    mock_handle_recording_done(0);
+    mock_handle_recording_done(ACT_COPY);
 
     ASSERT(mock_transcribe_calls == 2, "45s: 2 transcribe calls");
     ASSERT(mock_paste_calls == 1, "45s: 1 paste call");
@@ -249,7 +265,7 @@ static void test_chunk_60s(void) {
     reset_mocks();
 
     pcm_pos = SAMPLE_RATE * 60; /* 60s = 2 chunks of 30s */
-    mock_handle_recording_done(1);
+    mock_handle_recording_done(ACT_PASTE);
 
     ASSERT(mock_transcribe_calls == 2, "60s: 2 transcribe calls");
     ASSERT(mock_paste_calls == 1, "60s: 1 paste call");
@@ -263,7 +279,7 @@ static void test_chunk_300s(void) {
 
     cfg.max_duration = 300;
     pcm_pos = BUF_SAMPLES; /* 300s = 10 chunks of 30s */
-    mock_handle_recording_done(1);
+    mock_handle_recording_done(ACT_PASTE);
 
     ASSERT(mock_transcribe_calls == 10, "300s: 10 transcribe calls");
     ASSERT(mock_paste_calls == 1, "300s: 1 paste call");
@@ -275,7 +291,7 @@ static void test_chunk_zero_samples(void) {
     reset_mocks();
 
     pcm_pos = 0;
-    mock_handle_recording_done(0);
+    mock_handle_recording_done(ACT_COPY);
 
     ASSERT(mock_transcribe_calls == 0, "zero: no transcribe calls");
     ASSERT(mock_paste_calls == 0, "zero: no paste calls");
@@ -284,17 +300,37 @@ static void test_chunk_zero_samples(void) {
 static void test_chunk_autopaste_flag(void) {
     printf("test_chunk_autopaste_flag\n");
 
-    /* autopaste=0 */
+    /* ACT_COPY → autopaste=0 */
     reset_mocks();
     pcm_pos = SAMPLE_RATE;
-    mock_handle_recording_done(0);
-    ASSERT(mock_paste_autopaste == 0, "autopaste 0 passed through");
+    mock_handle_recording_done(ACT_COPY);
+    ASSERT(mock_paste_autopaste == 0, "ACT_COPY: no autopaste");
 
-    /* autopaste=1 */
+    /* ACT_PASTE → autopaste=1 */
     reset_mocks();
     pcm_pos = SAMPLE_RATE;
-    mock_handle_recording_done(1);
-    ASSERT(mock_paste_autopaste == 1, "autopaste 1 passed through");
+    mock_handle_recording_done(ACT_PASTE);
+    ASSERT(mock_paste_autopaste == 1, "ACT_PASTE: autopaste set");
+
+    /* ACT_TRANSLATE → autopaste=1 */
+    reset_mocks();
+    pcm_pos = SAMPLE_RATE;
+    mock_handle_recording_done(ACT_TRANSLATE);
+    ASSERT(mock_paste_autopaste == 1, "ACT_TRANSLATE: autopaste set");
+}
+
+static void test_chunk_translate(void) {
+    printf("test_chunk_translate\n");
+    reset_mocks();
+
+    pcm_pos = SAMPLE_RATE * 10; /* 10 seconds */
+    mock_handle_recording_done(ACT_TRANSLATE);
+
+    ASSERT(mock_transcribe_calls == 0, "translate: no transcribe calls");
+    ASSERT(mock_translate_calls == 1, "translate: 1 translate call");
+    ASSERT(mock_paste_calls == 1, "translate: 1 paste call");
+    ASSERT(strcmp(mock_paste_buf, "translated1") == 0, "translate: correct text");
+    ASSERT(mock_paste_autopaste == 1, "translate: autopaste set");
 }
 
 /* ── Main ───────────────────────────────────────────────────────────── */
@@ -313,6 +349,7 @@ int main(void) {
     test_chunk_300s();
     test_chunk_zero_samples();
     test_chunk_autopaste_flag();
+    test_chunk_translate();
 
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

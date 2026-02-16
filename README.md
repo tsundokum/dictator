@@ -1,6 +1,6 @@
 # Dictator
 
-Voice-to-text tool for Ubuntu. Hold a hotkey to dictate, release to transcribe. Two hotkeys: one copies to clipboard, the other copies and auto-pastes. Works on both X11 and Wayland.
+Voice-to-text tool for Ubuntu. Hold a hotkey to dictate, release to transcribe. Three hotkeys: one copies to clipboard, one copies and auto-pastes, and one translates to English and pastes. Works on both X11 and Wayland.
 
 ## Install
 
@@ -72,17 +72,23 @@ Optional config file at `/etc/dictator.conf`. If missing, defaults apply. Format
 
 ```ini
 # /etc/dictator.conf
-copy_key = F1
-paste_key = shift+F1
+speech2text_key = F1
+speech2text_paste_key = shift+F1
+speech2text_translate_paste_key = ctrl+F1
 notify = true
+# optional, default: whisper-large-v3
+groq_model = whisper-large-v3
+# optional, default: no proxy
+proxy = http://user:pass@www.example.com:1234
 ```
 
 ### Options
 
 | Key | Description | Format | Default |
 |-----|-------------|--------|---------|
-| `copy_key` | Hotkey: transcribe + clipboard only | `[shift+][ctrl+][alt+][super+]KeyName` | `F1` |
-| `paste_key` | Hotkey: transcribe + clipboard + Ctrl+V | `[shift+][ctrl+][alt+][super+]KeyName` | `shift+F1` |
+| `speech2text_key` | Hotkey: transcribe + clipboard only | `[shift+][ctrl+][alt+][super+]KeyName` | `F1` |
+| `speech2text_paste_key` | Hotkey: transcribe + clipboard + paste | `[shift+][ctrl+][alt+][super+]KeyName` | `shift+F1` |
+| `speech2text_translate_paste_key` | Hotkey: translate to English + paste | `[shift+][ctrl+][alt+][super+]KeyName` | `ctrl+F1` |
 | `notify` | Desktop notifications | `true` / `false` | `true` |
 | `groq_model` | Groq Whisper model name | string | `whisper-large-v3` |
 

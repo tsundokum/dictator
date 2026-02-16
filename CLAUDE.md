@@ -20,7 +20,7 @@ Compile-time flags: `-DUSE_X11 -DUSE_EVDEV` (both enabled by default in Makefile
 
 Single C file (`dictator.c`), two threads, two backends (X11 and evdev/Wayland). Tests in `test_config.c` which `#include`s `dictator.c` directly (with `#define main dictator_main` to avoid symbol collision) so it can access the static `cfg` struct and `load_config_file()`.
 
-Key statics: `pcm_buf` (recording buffer), `cfg` (config struct with copy_key/paste_key hotkey sub-structs and notify flag), `groq_key`/`aai_key` (loaded from .env), `active_backend` (detected at runtime).
+Key statics: `pcm_buf` (recording buffer), `cfg` (config struct with speech2text_key/speech2text_paste_key hotkey sub-structs and notify flag), `groq_key`/`aai_key` (loaded from .env), `active_backend` (detected at runtime).
 
 ### Backend detection
 
@@ -42,7 +42,7 @@ Config parsing uses `MOD_SHIFT`, `MOD_CTRL`, `MOD_ALT`, `MOD_SUPER` (not X11 mas
 
 | Function / Symbol | What it does |
 |---------|-------------|
-| `cfg` struct + `load_config()` | Parses `/etc/dictator.conf`, sets copy_key/paste_key hotkeys and notify |
+| `cfg` struct + `load_config()` | Parses `/etc/dictator.conf`, sets speech2text_key/speech2text_paste_key hotkeys and notify |
 | `parse_hotkey()` | Parses modifier prefixes + key name into a `struct hotkey` (using `MOD_*` flags) |
 | `detect_backend()` | Checks `XDG_SESSION_TYPE` to pick X11 or evdev backend |
 | `load_env()` | Reads `GROQ=` and `ASSEMBLYAI=` from `.env` |

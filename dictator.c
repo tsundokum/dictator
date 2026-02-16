@@ -10,7 +10,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <signal.h>
-#include <ctype.h>
+
 
 #ifdef USE_X11
 #include <X11/Xlib.h>
@@ -55,6 +55,8 @@ static int  have_groq, have_aai;
 #define MOD_ALT    (1 << 2)
 #define MOD_SUPER  (1 << 3)
 
+enum action { ACT_COPY, ACT_PASTE, ACT_TRANSLATE };
+
 /* ── Backend detection ────────────────────────────────────────────── */
 
 enum backend { BACKEND_X11, BACKEND_EVDEV };
@@ -81,19 +83,21 @@ struct hotkey {
 };
 
 static struct {
-    struct hotkey copy_key;       /* transcribe + clipboard only */
-    struct hotkey paste_key;      /* transcribe + clipboard + Ctrl+V */
+    struct hotkey speech2text_key;       /* transcribe + clipboard only */
+    struct hotkey speech2text_paste_key;      /* transcribe + clipboard + Ctrl+V */
+    struct hotkey speech2text_translate_paste_key;  /* translate to English + clipboard + paste */
     int           notify;         /* 1 = show desktop notifications */
     int           max_duration;   /* recording limit in seconds */
     char          groq_model[64]; /* Groq Whisper model name */
     char          proxy[256];     /* HTTP proxy URL, empty = direct */
 } cfg = {
-    .copy_key     = { .key_name = "F1", .mod_mask = 0 },
-    .paste_key    = { .key_name = "F1", .mod_mask = MOD_SHIFT },
-    .notify       = 1,
-    .max_duration = MAX_SECONDS,
-    .groq_model   = "whisper-large-v3",
-    .proxy        = "",
+    .speech2text_key      = { .key_name = "F1", .mod_mask = 0 },
+    .speech2text_paste_key     = { .key_name = "F1", .mod_mask = MOD_SHIFT },
+    .speech2text_translate_paste_key = { .key_name = "F1", .mod_mask = MOD_CTRL },
+    .notify        = 1,
+    .max_duration  = MAX_SECONDS,
+    .groq_model    = "whisper-large-v3",
+    .proxy         = "",
 };
 
 /* ── Config file loader ─────────────────────────────────────────────── */
@@ -152,10 +156,12 @@ static int load_config_file(const char *path) {
         char *val = eq + 1;
         while (*val == ' ' || *val == '\t') val++;
 
-        if (strcmp(key, "copy_key") == 0) {
-            parse_hotkey(val, &cfg.copy_key);
-        } else if (strcmp(key, "paste_key") == 0) {
-            parse_hotkey(val, &cfg.paste_key);
+        if (strcmp(key, "speech2text_key") == 0) {
+            parse_hotkey(val, &cfg.speech2text_key);
+        } else if (strcmp(key, "speech2text_paste_key") == 0) {
+            parse_hotkey(val, &cfg.speech2text_paste_key);
+        } else if (strcmp(key, "speech2text_translate_paste_key") == 0) {
+            parse_hotkey(val, &cfg.speech2text_translate_paste_key);
         } else if (strcmp(key, "notify") == 0) {
             cfg.notify = (strcmp(val, "true") == 0);
         } else if (strcmp(key, "groq_model") == 0) {
@@ -493,7 +499,7 @@ static int api_request(CURL *curl, struct curl_slist *headers,
 
 /* ── Groq Whisper API ──────────────────────────────────────────────── */
 
-static char *transcribe_groq(uint8_t *wav, size_t wav_len) {
+static char *groq_audio(uint8_t *wav, size_t wav_len, const char *endpoint) {
     CURL *curl = curl_easy_init();
     if (!curl) return NULL;
 
@@ -518,8 +524,7 @@ static char *transcribe_groq(uint8_t *wav, size_t wav_len) {
 
     struct response resp = {0};
 
-    curl_easy_setopt(curl, CURLOPT_URL,
-                     "https://api.groq.com/openai/v1/audio/transcriptions");
+    curl_easy_setopt(curl, CURLOPT_URL, endpoint);
     curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
 
     if (api_request(curl, headers, &resp, "groq") < 0) {
@@ -542,6 +547,16 @@ static char *transcribe_groq(uint8_t *wav, size_t wav_len) {
             resp.data[--len] = '\0';
     }
     return resp.data;
+}
+
+static char *transcribe_groq(uint8_t *wav, size_t wav_len) {
+    return groq_audio(wav, wav_len,
+                      "https://api.groq.com/openai/v1/audio/transcriptions");
+}
+
+static char *translate_groq(uint8_t *wav, size_t wav_len) {
+    return groq_audio(wav, wav_len,
+                      "https://api.groq.com/openai/v1/audio/translations");
 }
 
 /* ── AssemblyAI transcription API ──────────────────────────────────── */
@@ -698,6 +713,18 @@ static char *transcribe(uint8_t *wav, size_t wav_len) {
     return NULL;
 }
 
+/* ── Translation (Groq only — AssemblyAI doesn't support it) ───────── */
+
+static char *translate(uint8_t *wav, size_t wav_len) {
+    if (!have_groq) {
+        notify("Translation requires Groq API key");
+        return NULL;
+    }
+    char *r = translate_groq(wav, wav_len);
+    if (!r) notify("Translation failed");
+    return r;
+}
+
 /* ── Clipboard + paste ──────────────────────────────────────────────── */
 
 static void paste_text(const char *text, int autopaste) {
@@ -735,7 +762,7 @@ static void handle_signal(int sig) {
 
 /* ── Shared post-recording logic ─────────────────────────────────────── */
 
-static void handle_recording_done(int autopaste) {
+static void handle_recording_done(enum action act) {
     if (pcm_pos == 0) {
         notify("No audio captured");
         return;
@@ -757,7 +784,8 @@ static void handle_recording_done(int autopaste) {
         size_t wav_len = build_wav(pcm_buf + offset, chunk_samples, &wav);
         if (!wav_len) { notify("WAV build failed"); return; }
 
-        char *text = transcribe(wav, wav_len);
+        char *text = (act == ACT_TRANSLATE) ? translate(wav, wav_len)
+                                            : transcribe(wav, wav_len);
         free(wav);
 
         if (text && strlen(text) > 0) {
@@ -775,9 +803,11 @@ static void handle_recording_done(int autopaste) {
     }
 
     if (result_len > 0) {
-        paste_text(result, autopaste);
-        notify(autopaste ? "Done — pasted"
-                         : "Done — copied to clipboard");
+        paste_text(result, act != ACT_COPY);
+        const char *msg = (act == ACT_TRANSLATE) ? "Done — translated & pasted"
+                        : (act == ACT_PASTE)     ? "Done — pasted"
+                        :                          "Done — copied to clipboard";
+        notify(msg);
         printf("dictator: %s\n", result);
     } else {
         notify("No text returned");
@@ -829,52 +859,69 @@ static int run_x11(void) {
     if (!dpy) { fprintf(stderr, "dictator: cannot open display\n"); return 1; }
     XkbSetDetectableAutoRepeat(dpy, True, NULL);
 
-    /* Resolve copy_key */
-    KeySym copy_ks = XStringToKeysym(cfg.copy_key.key_name);
+    /* Resolve speech2text_key */
+    KeySym copy_ks = XStringToKeysym(cfg.speech2text_key.key_name);
     if (copy_ks == NoSymbol) {
-        fprintf(stderr, "dictator: unknown copy_key '%s'\n", cfg.copy_key.key_name);
+        fprintf(stderr, "dictator: unknown speech2text_key '%s'\n", cfg.speech2text_key.key_name);
         XCloseDisplay(dpy);
         return 1;
     }
-    /* Resolve paste_key */
-    KeySym paste_ks = XStringToKeysym(cfg.paste_key.key_name);
+    /* Resolve speech2text_paste_key */
+    KeySym paste_ks = XStringToKeysym(cfg.speech2text_paste_key.key_name);
     if (paste_ks == NoSymbol) {
-        fprintf(stderr, "dictator: unknown paste_key '%s'\n", cfg.paste_key.key_name);
+        fprintf(stderr, "dictator: unknown speech2text_paste_key '%s'\n", cfg.speech2text_paste_key.key_name);
+        XCloseDisplay(dpy);
+        return 1;
+    }
+    /* Resolve speech2text_translate_paste_key */
+    KeySym translate_ks = XStringToKeysym(cfg.speech2text_translate_paste_key.key_name);
+    if (translate_ks == NoSymbol) {
+        fprintf(stderr, "dictator: unknown speech2text_translate_paste_key '%s'\n", cfg.speech2text_translate_paste_key.key_name);
         XCloseDisplay(dpy);
         return 1;
     }
 
     Window root = DefaultRootWindow(dpy);
-    KeyCode copy_kc  = XKeysymToKeycode(dpy, copy_ks);
-    KeyCode paste_kc = XKeysymToKeycode(dpy, paste_ks);
+    KeyCode copy_kc      = XKeysymToKeycode(dpy, copy_ks);
+    KeyCode paste_kc     = XKeysymToKeycode(dpy, paste_ks);
+    KeyCode translate_kc = XKeysymToKeycode(dpy, translate_ks);
     if (!copy_kc) {
-        fprintf(stderr, "dictator: copy_key '%s' has no keycode in X11 keymap\n",
-                cfg.copy_key.key_name);
+        fprintf(stderr, "dictator: speech2text_key '%s' has no keycode in X11 keymap\n",
+                cfg.speech2text_key.key_name);
         XCloseDisplay(dpy);
         return 1;
     }
     if (!paste_kc) {
-        fprintf(stderr, "dictator: paste_key '%s' has no keycode in X11 keymap\n",
-                cfg.paste_key.key_name);
+        fprintf(stderr, "dictator: speech2text_paste_key '%s' has no keycode in X11 keymap\n",
+                cfg.speech2text_paste_key.key_name);
+        XCloseDisplay(dpy);
+        return 1;
+    }
+    if (!translate_kc) {
+        fprintf(stderr, "dictator: speech2text_translate_paste_key '%s' has no keycode in X11 keymap\n",
+                cfg.speech2text_translate_paste_key.key_name);
         XCloseDisplay(dpy);
         return 1;
     }
 
-    unsigned copy_xmod  = mod_to_x11(cfg.copy_key.mod_mask);
-    unsigned paste_xmod = mod_to_x11(cfg.paste_key.mod_mask);
+    unsigned copy_xmod      = mod_to_x11(cfg.speech2text_key.mod_mask);
+    unsigned paste_xmod     = mod_to_x11(cfg.speech2text_paste_key.mod_mask);
+    unsigned translate_xmod = mod_to_x11(cfg.speech2text_translate_paste_key.mod_mask);
 
-    grab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
-    grab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
+    grab_hotkey(dpy, root, copy_kc,      cfg.speech2text_key.mod_mask);
+    grab_hotkey(dpy, root, paste_kc,     cfg.speech2text_paste_key.mod_mask);
+    grab_hotkey(dpy, root, translate_kc, cfg.speech2text_translate_paste_key.mod_mask);
 
-    char copy_str[128], paste_str[128];
-    print_hotkey(&cfg.copy_key,  copy_str,  sizeof(copy_str));
-    print_hotkey(&cfg.paste_key, paste_str, sizeof(paste_str));
-    printf("dictator: ready (X11) — hold %s to copy, %s to paste\n",
-           copy_str, paste_str);
+    char copy_str[128], paste_str[128], translate_str[128];
+    print_hotkey(&cfg.speech2text_key,      copy_str,      sizeof(copy_str));
+    print_hotkey(&cfg.speech2text_paste_key,     paste_str,     sizeof(paste_str));
+    print_hotkey(&cfg.speech2text_translate_paste_key, translate_str,  sizeof(translate_str));
+    printf("dictator: ready (X11) — hold %s to copy, %s to paste, %s to translate\n",
+           copy_str, paste_str, translate_str);
 
     pthread_t tid;
     int is_recording = 0;
-    int active_autopaste = 0;
+    enum action active_action = ACT_COPY;
     KeyCode active_kc = 0;
 
     int xfd = ConnectionNumber(dpy);
@@ -892,13 +939,17 @@ static int run_x11(void) {
                 /* Strip lock-key bits to match our configured modifiers */
                 unsigned clean = ev.xkey.state & ~(Mod2Mask | LockMask);
 
-                if (ev.xkey.keycode == paste_kc &&
+                if (ev.xkey.keycode == translate_kc &&
+                    clean == translate_xmod) {
+                    active_action = ACT_TRANSLATE;
+                    active_kc = translate_kc;
+                } else if (ev.xkey.keycode == paste_kc &&
                     clean == paste_xmod) {
-                    active_autopaste = 1;
+                    active_action = ACT_PASTE;
                     active_kc = paste_kc;
                 } else if (ev.xkey.keycode == copy_kc &&
                            clean == copy_xmod) {
-                    active_autopaste = 0;
+                    active_action = ACT_COPY;
                     active_kc = copy_kc;
                 } else {
                     continue;
@@ -920,7 +971,7 @@ static int run_x11(void) {
                 recording = 0;
                 pthread_join(tid, NULL);
                 is_recording = 0;
-                handle_recording_done(active_autopaste);
+                handle_recording_done(active_action);
             }
         }
     }
@@ -929,8 +980,9 @@ static int run_x11(void) {
         recording = 0;
         pthread_join(tid, NULL);
     }
-    ungrab_hotkey(dpy, root, copy_kc,  cfg.copy_key.mod_mask);
-    ungrab_hotkey(dpy, root, paste_kc, cfg.paste_key.mod_mask);
+    ungrab_hotkey(dpy, root, copy_kc,      cfg.speech2text_key.mod_mask);
+    ungrab_hotkey(dpy, root, paste_kc,     cfg.speech2text_paste_key.mod_mask);
+    ungrab_hotkey(dpy, root, translate_kc, cfg.speech2text_translate_paste_key.mod_mask);
     XCloseDisplay(dpy);
     return 0;
 }
@@ -1048,16 +1100,22 @@ static void update_mod_state(unsigned code, int pressed) {
 
 static int run_evdev(void) {
     /* Resolve keycodes from config */
-    int copy_code = keyname_to_evdev(cfg.copy_key.key_name);
+    int copy_code = keyname_to_evdev(cfg.speech2text_key.key_name);
     if (copy_code < 0) {
-        fprintf(stderr, "dictator: unknown copy_key '%s' for evdev\n",
-                cfg.copy_key.key_name);
+        fprintf(stderr, "dictator: unknown speech2text_key '%s' for evdev\n",
+                cfg.speech2text_key.key_name);
         return 1;
     }
-    int paste_code = keyname_to_evdev(cfg.paste_key.key_name);
+    int paste_code = keyname_to_evdev(cfg.speech2text_paste_key.key_name);
     if (paste_code < 0) {
-        fprintf(stderr, "dictator: unknown paste_key '%s' for evdev\n",
-                cfg.paste_key.key_name);
+        fprintf(stderr, "dictator: unknown speech2text_paste_key '%s' for evdev\n",
+                cfg.speech2text_paste_key.key_name);
+        return 1;
+    }
+    int translate_code = keyname_to_evdev(cfg.speech2text_translate_paste_key.key_name);
+    if (translate_code < 0) {
+        fprintf(stderr, "dictator: unknown speech2text_translate_paste_key '%s' for evdev\n",
+                cfg.speech2text_translate_paste_key.key_name);
         return 1;
     }
 
@@ -1066,15 +1124,16 @@ static int run_evdev(void) {
 
     int fd = libevdev_get_fd(dev);
 
-    char copy_str[128], paste_str[128];
-    print_hotkey(&cfg.copy_key,  copy_str,  sizeof(copy_str));
-    print_hotkey(&cfg.paste_key, paste_str, sizeof(paste_str));
-    printf("dictator: ready (evdev/Wayland) — hold %s to copy, %s to paste\n",
-           copy_str, paste_str);
+    char copy_str[128], paste_str[128], translate_str[128];
+    print_hotkey(&cfg.speech2text_key,      copy_str,      sizeof(copy_str));
+    print_hotkey(&cfg.speech2text_paste_key,     paste_str,     sizeof(paste_str));
+    print_hotkey(&cfg.speech2text_translate_paste_key, translate_str,  sizeof(translate_str));
+    printf("dictator: ready (evdev/Wayland) — hold %s to copy, %s to paste, %s to translate\n",
+           copy_str, paste_str, translate_str);
 
     pthread_t tid;
     int is_recording = 0;
-    int active_autopaste = 0;
+    enum action active_action = ACT_COPY;
     int active_code = 0;
 
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -1096,14 +1155,19 @@ static int run_evdev(void) {
             if (ev.value == 1 && !is_recording) {
                 /* Key press (not repeat) */
                 int matched = 0;
-                if ((int)ev.code == paste_code &&
-                    evdev_mod_state == cfg.paste_key.mod_mask) {
-                    active_autopaste = 1;
+                if ((int)ev.code == translate_code &&
+                    evdev_mod_state == cfg.speech2text_translate_paste_key.mod_mask) {
+                    active_action = ACT_TRANSLATE;
+                    active_code = translate_code;
+                    matched = 1;
+                } else if ((int)ev.code == paste_code &&
+                    evdev_mod_state == cfg.speech2text_paste_key.mod_mask) {
+                    active_action = ACT_PASTE;
                     active_code = paste_code;
                     matched = 1;
                 } else if ((int)ev.code == copy_code &&
-                           evdev_mod_state == cfg.copy_key.mod_mask) {
-                    active_autopaste = 0;
+                           evdev_mod_state == cfg.speech2text_key.mod_mask) {
+                    active_action = ACT_COPY;
                     active_code = copy_code;
                     matched = 1;
                 }
@@ -1126,7 +1190,7 @@ static int run_evdev(void) {
                 recording = 0;
                 pthread_join(tid, NULL);
                 is_recording = 0;
-                handle_recording_done(active_autopaste);
+                handle_recording_done(active_action);
             }
         }
     }
