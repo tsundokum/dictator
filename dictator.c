@@ -86,12 +86,14 @@ static struct {
     int           notify;         /* 1 = show desktop notifications */
     int           max_duration;   /* recording limit in seconds */
     char          groq_model[64]; /* Groq Whisper model name */
+    char          proxy[256];     /* HTTP proxy URL, empty = direct */
 } cfg = {
     .copy_key     = { .key_name = "F1", .mod_mask = 0 },
     .paste_key    = { .key_name = "F1", .mod_mask = MOD_SHIFT },
     .notify       = 1,
     .max_duration = MAX_SECONDS,
     .groq_model   = "whisper-large-v3",
+    .proxy        = "",
 };
 
 /* ── Config file loader ─────────────────────────────────────────────── */
@@ -158,6 +160,8 @@ static int load_config_file(const char *path) {
             cfg.notify = (strcmp(val, "true") == 0);
         } else if (strcmp(key, "groq_model") == 0) {
             snprintf(cfg.groq_model, sizeof(cfg.groq_model), "%s", val);
+        } else if (strcmp(key, "proxy") == 0) {
+            snprintf(cfg.proxy, sizeof(cfg.proxy), "%s", val);
         } else if (strcmp(key, "max_duration") == 0) {
             int v = atoi(val);
             if (v < 10) v = 10;
@@ -463,6 +467,8 @@ static int api_request(CURL *curl, struct curl_slist *headers,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    if (cfg.proxy[0])
+        curl_easy_setopt(curl, CURLOPT_PROXY, cfg.proxy);
 
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK) {

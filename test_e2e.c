@@ -177,6 +177,7 @@ int main(void) {
         free(ref_text);
         return 1;
     }
+    load_config(); /* pick up proxy and other settings from /etc/dictator.conf */
     cfg.notify = 0; /* suppress desktop notifications */
     curl_global_init(CURL_GLOBAL_ALL);
 

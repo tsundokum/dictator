@@ -33,6 +33,7 @@ static void reset_cfg(void) {
     cfg.notify = 1;
     cfg.max_duration = MAX_SECONDS;
     snprintf(cfg.groq_model, sizeof(cfg.groq_model), "whisper-large-v3");
+    cfg.proxy[0] = '\0';
 }
 
 /* Write content to a temp file, load it, then remove */
@@ -259,6 +260,19 @@ static void test_groq_model_custom(void) {
            "groq_model set to custom value");
 }
 
+static void test_proxy_default(void) {
+    printf("test_proxy_default\n");
+    reset_cfg();
+    ASSERT(cfg.proxy[0] == '\0', "default proxy is empty");
+}
+
+static void test_proxy_custom(void) {
+    printf("test_proxy_custom\n");
+    load_from_string("proxy = http://user:pass@host:port\n");
+    ASSERT(strcmp(cfg.proxy, "http://user:pass@host:port") == 0,
+           "proxy set to custom value");
+}
+
 int main(void) {
     test_defaults();
     test_simple_copy_key();
@@ -286,6 +300,8 @@ int main(void) {
     test_max_duration_clamped();
     test_groq_model_default();
     test_groq_model_custom();
+    test_proxy_default();
+    test_proxy_custom();
 
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
