@@ -539,12 +539,17 @@ static char *groq_audio(uint8_t *wav, size_t wav_len, const char *endpoint) {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    /* Trim trailing whitespace */
+    /* Trim leading and trailing whitespace */
     if (resp.data) {
         size_t len = strlen(resp.data);
         while (len > 0 && (resp.data[len-1] == '\n' || resp.data[len-1] == '\r'
                            || resp.data[len-1] == ' '))
             resp.data[--len] = '\0';
+        char *start = resp.data;
+        while (*start == ' ' || *start == '\n' || *start == '\r')
+            start++;
+        if (start != resp.data)
+            memmove(resp.data, start, strlen(start) + 1);
     }
     return resp.data;
 }
