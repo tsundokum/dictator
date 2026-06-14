@@ -2,7 +2,7 @@
 
 Voice-to-text tool for Ubuntu. Hold a hotkey to dictate, release to transcribe. Three hotkeys: one copies to clipboard, one copies and auto-pastes, and one translates to English and pastes. Works on both X11 and Wayland.
 
-(MacOS port)[https://github.com/youllbeaman-sketch/transcribe]
+[MacOS port](https://github.com/youllbeaman-sketch/transcribe)
 ## Install
 
 ### Build dependencies
